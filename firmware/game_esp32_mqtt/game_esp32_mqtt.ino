@@ -471,17 +471,23 @@ void maintainWiFi() {
 }
 
 void maintainMQTT() {
-  // If already failed 3 times or Wi-Fi is off, stay offline without blocking the main thread
+  // If already connected, ALWAYS call mqtt.loop()!
+  // mqtt.loop() is non-blocking (~50us) and processes incoming commands (START, RESET, STOP, SOLVE)
+  if (mqtt.connected()) {
+    mqtt.loop();
+    return;
+  }
+
+  // -----------------------------------------------------------------
+  // ONLY below this line are we disconnected and considering reconnect
+  // -----------------------------------------------------------------
+
+  // If already reached max connection attempts, stay offline without blocking
   if (mqttOfflineMode) return;
 
   maintainWiFi();
 
   if (WiFi.status() != WL_CONNECTED) return;
-
-  if (mqtt.connected()) {
-    mqtt.loop();
-    return;
-  }
 
   unsigned long now = millis();
   if (now - lastMqttRetry > 5000) {

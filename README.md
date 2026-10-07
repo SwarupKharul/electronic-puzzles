@@ -196,6 +196,46 @@ sudo iptables -I INPUT -p tcp --dport 1884 -j ACCEPT
 
 ---
 
+## 🦟 MQTT Broker & Eclipse Mosquitto (Optional Setup)
+
+The Escape Room Master server has an **embedded zero-config MQTT broker (`Aedes`)** built directly into Node.js (running on Port 1883/1884). Installing Mosquitto is **completely optional**.
+
+However, if you wish to run a dedicated standalone **Eclipse Mosquitto** broker or use `mosquitto_sub` / `mosquitto_pub` CLI tools to sniff live prop traffic:
+
+### Linux / Ubuntu / Pop!_OS
+```bash
+# 1. Install Mosquitto broker and CLI client utilities
+sudo apt update && sudo apt install -y mosquitto mosquitto-clients
+
+# 2. Configure Mosquitto 2.0+ to allow remote ESP32s on local Wi-Fi
+sudo bash -c 'cat <<EOF > /etc/mosquitto/conf.d/default.conf
+listener 1883 0.0.0.0
+allow_anonymous true
+EOF'
+
+# 3. Restart and enable the service
+sudo systemctl restart mosquitto
+sudo systemctl enable mosquitto
+```
+
+### Windows 10 & 11
+- Install via Windows Package Manager: `winget install EclipseFoundation.Mosquitto`
+- Or use the official installer. See complete step-by-step instructions in [**WINDOWS_SETUP.md**](file:///home/swarup/Downloads/escaperoommaster/claude/v2/WINDOWS_SETUP.md).
+
+### 🔍 Live Sniffing & CLI Control
+```bash
+# Live monitor all room telemetry and heartbeats:
+mosquitto_sub -h localhost -p 1883 -t "escaperoom/#" -v
+
+# Manually trigger Game 1 (Knock) remote solve:
+mosquitto_pub -h localhost -p 1883 -t "escaperoom/game1/cmd" -m "SOLVE"
+
+# Manually trigger Game 2 (Dolls) remote reset:
+mosquitto_pub -h localhost -p 1883 -t "escaperoom/game2/cmd" -m "RESET"
+```
+
+---
+
 ## 📖 Game Master Operational Guide
 
 For day-to-day operations, situation handling, clue guidelines, and room turnaround checklists, refer to the companion manual:  

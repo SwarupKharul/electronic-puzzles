@@ -30,7 +30,75 @@ If you just moved this folder to a new Windows machine:
      npm -v
      ```
 
+2. **Eclipse Mosquitto MQTT Broker (Optional / Standalone Setup)**:
+   - **Do you need Mosquitto?** **No, it is optional!** This system already includes a built-in, zero-configuration embedded MQTT broker (`Aedes`) inside `start.bat`.
+   - **Why install Mosquitto?**
+     - To run a dedicated 24/7 background Windows MQTT service.
+     - To get the `mosquitto_sub` and `mosquitto_pub` CLI diagnostic tools to sniff live prop traffic.
+
 ---
+
+## 🦟 Mosquitto MQTT Broker Installation (Windows)
+
+If you wish to use standalone Mosquitto on Windows:
+
+### Method 1: Automatic Install via Winget (Fastest)
+Open Command Prompt or PowerShell as Administrator and run:
+```cmd
+winget install EclipseFoundation.Mosquitto
+```
+
+### Method 2: Official Windows Installer
+1. Download the latest 64-bit installer from the official site:  
+   🔗 **[https://mosquitto.org/download/](https://mosquitto.org/download/)** (e.g. `mosquitto-2.0.x-install-windows-x64.exe`).
+2. Run the `.exe` installer (accept the default path `C:\Program Files\mosquitto`).
+3. Add `C:\Program Files\mosquitto` to your Windows System `PATH` so you can run `mosquitto_sub` and `mosquitto_pub` from any terminal.
+
+### ⚠️ Critical Step: Mosquitto 2.0+ Configuration for Remote ESP32s
+By default, Mosquitto 2.0 and newer **blocks remote connections** and only listens on `localhost` (127.0.0.1). To allow your ESP32 props to connect over Wi-Fi:
+
+1. Open Notepad **as Administrator** (right-click Notepad ➔ *Run as administrator*).
+2. Open the file: `C:\Program Files\mosquitto\mosquitto.conf`
+3. Scroll to the very bottom of the file and add these two lines:
+   ```conf
+   listener 1883 0.0.0.0
+   allow_anonymous true
+   ```
+4. Save the file (`Ctrl + S`).
+
+### Managing the Mosquitto Windows Service
+- **Start the Broker Service**:
+  ```cmd
+  net start mosquitto
+  ```
+- **Stop the Broker Service**:
+  ```cmd
+  net stop mosquitto
+  ```
+- **Restart the Service** (after config changes):
+  ```cmd
+  net stop mosquitto && net start mosquitto
+  ```
+- **Or via Windows GUI**: Press `Win + R` ➔ type `services.msc` ➔ find **Mosquitto Broker** ➔ Right-click and choose **Start** or **Restart**. Ensure **Startup type** is set to **Automatic**.
+
+### 🔍 Live Sniffing & Debugging with Mosquitto CLI
+Once Mosquitto is installed, you can use these commands to inspect or control props in real time from Command Prompt:
+
+- **Listen to all room telemetry & heartbeats**:
+  ```cmd
+  mosquitto_sub -h localhost -p 1883 -t "escaperoom/#" -v
+  ```
+- **Trigger Game 1 (Knock Puzzle) Remote Solve**:
+  ```cmd
+  mosquitto_pub -h localhost -p 1883 -t "escaperoom/game1/cmd" -m "SOLVE"
+  ```
+- **Trigger Game 2 (RFID Dolls) Remote Reset**:
+  ```cmd
+  mosquitto_pub -h localhost -p 1883 -t "escaperoom/game2/cmd" -m "RESET"
+  ```
+
+> [!NOTE]
+> If Mosquitto is running on port 1883, the Escape Room Control Server (`start.bat`) automatically detects it and binds its secondary embedded broker to port `1884`. Both work simultaneously with zero conflict!
 
 ## 🌐 Network Configuration (Allowing Tablets & ESP32s)
 

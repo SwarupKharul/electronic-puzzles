@@ -77,8 +77,11 @@ const bool AUTO_START_ON_BOOT = true;
 // =================================================================================
 // 2. NETWORK & mDNS / MQTT CONFIGURATION (ZERO-IP SETUP)
 // =================================================================================
-const char* WIFI_SSID     = "Airtel_anjo_4056";
-const char* WIFI_PASS     = "air38409";
+// const char* WIFI_SSID     = "Airtel_anjo_4056";
+// const char* WIFI_PASS     = "air38409";
+
+const char* WIFI_SSID     = "operations_404";
+const char* WIFI_PASS     = "Mytplink2020";
 
 // mDNS Configuration - The ESP32 discovers the server automatically!
 const char* MDNS_HOST_ESCAPEROOM = "escaperoom"; // Will query 'escaperoom.local'
@@ -162,6 +165,8 @@ char topicCmd[64];
 unsigned long lastMqttRetry = 0;
 unsigned long lastWiFiRetry = 0;
 int mqttFailCount = 0;
+const int MAX_MQTT_ATTEMPTS = 3;     // Max 3 connection attempts before giving up to prevent blocking main thread
+bool mqttOfflineMode = false;       // Set to true after 3 failed attempts (runs 100% offline with zero latency)
 
 // Forward Declarations
 void setupWiFi();
@@ -268,6 +273,8 @@ void handleCommand(String cmd) {
     stateTransitionTime = 0;
     lockDoor();
     resetKnockState();
+    mqttOfflineMode = false;
+    mqttFailCount = 0;
     publishState(READY);
     publishEvent("RESET");
     updateLcdDisplay();
@@ -313,7 +320,7 @@ void setup() {
 
   mqtt.setBufferSize(512);
   mqtt.setKeepAlive(15); // 15s keepalive ensures fast broker detection
-  mqtt.setSocketTimeout(15);
+  mqtt.setSocketTimeout(1); // 1s socket timeout prevents network connection stalls
 
   setupWiFi();
   mqtt.setCallback(mqttCallback);
@@ -333,32 +340,40 @@ void setup() {
 }
 
 // =================================================================================
-// 9. MAIN LOOP (100% Non-Blocking)
+// 9. MAIN LOOP (100% Non-Blocking & Sensor-Prioritized)
 // =================================================================================
 void loop() {
   unsigned long now = millis();
 
-  // 1. Maintain Network & MQTT
+  // 1. PRIORITY #1: Handle Knock Sensing & Pattern Logic FIRST (Zero Latency)
+  if (currentState == STARTED || currentState == READY) {
+    checkKnockInput();
+  }
+
+  // 2. Maintain Network & MQTT (Skips completely if player is knocking or in offline mode)
   maintainMQTT();
 
-  // 2. Periodic Heartbeat to Server
-  if (now - lastHeartbeat > HEARTBEAT_INTERVAL) {
+  // 3. Periodic Heartbeat to Server (Only if connected)
+  if (mqtt.connected() && (now - lastHeartbeat > HEARTBEAT_INTERVAL)) {
     lastHeartbeat = now;
     publishEvent("HEARTBEAT");
   }
 
-  // 3. Non-Blocking Physical Manual Reset Button check
+  // 4. Non-Blocking Physical Manual Reset Button check
   bool currentBtnState = digitalRead(RESET_BTN_PIN);
   if (currentBtnState == LOW && lastButtonState == HIGH) {
     if (now - lastButtonPressTime > 250) {
       lastButtonPressTime = now;
       Serial.println("🔘 Hardware Reset Pressed");
+      // Allow fresh MQTT attempts on manual reset
+      mqttOfflineMode = false;
+      mqttFailCount = 0;
       handleCommand("RESET");
     }
   }
   lastButtonState = currentBtnState;
 
-  // 4. Non-Blocking State Transition Check (for FAILED cooldown)
+  // 5. Non-Blocking State Transition Check (for FAILED cooldown)
   if (stateTransitionTime > 0 && now >= stateTransitionTime) {
     stateTransitionTime = 0;
     if (currentState == FAILED) {
@@ -367,11 +382,6 @@ void loop() {
       publishState(STARTED);
       updateLcdDisplay();
     }
-  }
-
-  // 5. Handle Knock Sensing & Pattern Logic (active in both READY and STARTED)
-  if (currentState == STARTED || currentState == READY) {
-    checkKnockInput();
   }
 
   // 6. Non-blocking Auto-Relock Timer check (for Solenoid locks)
@@ -570,8 +580,8 @@ void setupWiFi() {
   Serial.print("📶 Connecting to Wi-Fi");
 
   int retries = 0;
-  while (WiFi.status() != WL_CONNECTED && retries < 25) {
-    delay(300);
+  while (WiFi.status() != WL_CONNECTED && retries < 15) {
+    delay(200);
     Serial.print(".");
     retries++;
   }
@@ -583,14 +593,17 @@ void setupWiFi() {
 
     discoverMQTTServer();
   } else {
-    Serial.println("\n⚠️ Wi-Fi Timeout. Continuing in standalone/offline mode.");
+    Serial.println("\n⚠️ Wi-Fi Timeout. Entering 100% standalone offline mode.");
+    mqttOfflineMode = true;
   }
 }
 
 void maintainWiFi() {
+  if (mqttOfflineMode) return; // Do not interrupt sensor loop when in standalone offline mode
+
   if (WiFi.status() != WL_CONNECTED) {
     unsigned long now = millis();
-    if (now - lastWiFiRetry > 10000) {
+    if (now - lastWiFiRetry > 15000) {
       lastWiFiRetry = now;
       Serial.println("📶 [Wi-Fi] Connection lost. Attempting auto-reconnect...");
       WiFi.disconnect();
@@ -600,6 +613,12 @@ void maintainWiFi() {
 }
 
 void maintainMQTT() {
+  // CRITICAL: If player is actively knocking, pause ALL network calls to guarantee zero latency!
+  if (waitingForPattern || knockCount > 0) return;
+
+  // If already failed 3 times or Wi-Fi is off, stay offline without blocking the main thread
+  if (mqttOfflineMode) return;
+
   maintainWiFi();
 
   if (WiFi.status() != WL_CONNECTED) return;
@@ -612,7 +631,10 @@ void maintainMQTT() {
   unsigned long now = millis();
   if (now - lastMqttRetry > 5000) {
     lastMqttRetry = now;
-    Serial.printf("🔌 Connecting to MQTT Broker at %s:%d...\n", 
+    mqttFailCount++;
+
+    Serial.printf("🔌 [MQTT Attempt %d/%d] Connecting to %s:%d...\n", 
+                  mqttFailCount, MAX_MQTT_ATTEMPTS,
                   activeMqttIP.toString().c_str(), activeMqttPort);
 
     String clientId = "ESP32-KnockProp-" + String(GAME_ID);
@@ -625,14 +647,12 @@ void maintainMQTT() {
       mqtt.subscribe(topicCmd);
       publishState(currentState);
     } else {
-      Serial.printf("⚠️ MQTT Failed (rc=%d). Retrying in 5 seconds...\n", mqtt.state());
-      mqttFailCount++;
+      Serial.printf("⚠️ MQTT Connection Failed (rc=%d).\n", mqtt.state());
 
-      // If failed 3 times, re-run mDNS discovery
-      if (mqttFailCount >= 3) {
-        Serial.println("🔄 Re-checking mDNS in case server IP or network changed...");
-        discoverMQTTServer();
-        mqttFailCount = 0;
+      if (mqttFailCount >= MAX_MQTT_ATTEMPTS) {
+        mqttOfflineMode = true;
+        Serial.println("🛑 [MQTT] Failed 3 attempts. Stopping network retries permanently!");
+        Serial.println("🎮 100% STANDALONE OFFLINE MODE: Knock detection given full priority.");
       }
     }
   }

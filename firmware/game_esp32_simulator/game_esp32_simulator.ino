@@ -86,7 +86,7 @@ void setup() {
 
   mqtt.setBufferSize(512);
   mqtt.setKeepAlive(15);
-  mqtt.setSocketTimeout(15);
+  mqtt.setSocketTimeout(1);
   mqtt.setServer(MQTT_SERVER, MQTT_PORT);
   mqtt.setCallback(mqttCallback);
 

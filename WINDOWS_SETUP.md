@@ -55,8 +55,16 @@ winget install EclipseFoundation.Mosquitto
 3. Add `C:\Program Files\mosquitto` to your Windows System `PATH` so you can run `mosquitto_sub` and `mosquitto_pub` from any terminal.
 
 ### ⚠️ Critical Step: Mosquitto 2.0+ Configuration for Remote ESP32s
-By default, Mosquitto 2.0 and newer **blocks remote connections** and only listens on `localhost` (127.0.0.1). To allow your ESP32 props to connect over Wi-Fi:
+By default, Mosquitto 2.0 and newer **blocks remote connections** and only listens on `localhost` (127.0.0.1). 
 
+A production-ready [`mosquitto.conf`](file:///home/swarup/Downloads/escaperoommaster/claude/v2/mosquitto.conf) is already included in this repository root!
+
+#### Option A: Run directly using the included config file:
+```cmd
+mosquitto -c mosquitto.conf -v
+```
+
+#### Option B: Configure the Windows background service:
 1. Open Notepad **as Administrator** (right-click Notepad ➔ *Run as administrator*).
 2. Open the file: `C:\Program Files\mosquitto\mosquitto.conf`
 3. Scroll to the very bottom of the file and add these two lines:

@@ -218,6 +218,12 @@ sudo systemctl restart mosquitto
 sudo systemctl enable mosquitto
 ```
 
+### Running with Pre-Configured Config:
+A production config is included in the project root:
+```bash
+mosquitto -c mosquitto.conf -v
+```
+
 ### Windows 10 & 11
 - Install via Windows Package Manager: `winget install EclipseFoundation.Mosquitto`
 - Or use the official installer. See complete step-by-step instructions in [**WINDOWS_SETUP.md**](file:///home/swarup/Downloads/escaperoommaster/claude/v2/WINDOWS_SETUP.md).

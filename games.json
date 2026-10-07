@@ -1,0 +1,15 @@
+{
+  "rootTopic": "escaperoom",
+  "games": [
+    {
+      "id": "game1",
+      "name": "Knock Puzzle Prop",
+      "description": "Secret rhythm knock sensor prop"
+    },
+    {
+      "id": "game2",
+      "name": "Dolls Puzzle",
+      "description": "4-RFID dolls placement puzzle prop"
+    }
+  ]
+}

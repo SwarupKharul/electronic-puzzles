@@ -1,0 +1,84 @@
+# ==============================================================================
+# Node / Web (Vite, React, npm)
+# ==============================================================================
+node_modules/
+jspm_packages/
+dist/
+dist-ssr/
+build/
+.vite/
+*.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Environment Variables & Secrets
+.env
+.env.*
+!.env.example
+
+# Temporary / Cache
+.eslintcache
+.cache/
+.parcel-cache/
+.turbo/
+*.tsbuildinfo
+
+# ==============================================================================
+# Arduino / ESP32 / PlatformIO Build Artifacts
+# ==============================================================================
+*.hex
+*.bin
+*.elf
+*.eep
+*.o
+*.a
+*.d
+*.map
+.pio/
+.pioenvs/
+.piolibdeps/
+.clangd/
+compile_commands.json
+
+# ==============================================================================
+# OS / System Files
+# ==============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+[Dd]esktop.ini
+
+# ==============================================================================
+# IDEs and Editors
+# ==============================================================================
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+
+# ==============================================================================
+# Archive / Temporary Files
+# ==============================================================================
+*.zip
+*.tar.gz
+*.tgz
+*.rar
+*.bak
+*.orig

@@ -1,18 +1,24 @@
 /*
  * =================================================================================
- * ESCAPE ROOM GAME PROP ESP32 FIRMWARE (Production Non-Blocking Template)
+ * ESCAPE ROOM GAME PROP ESP32 FIRMWARE (Dual-Core FreeRTOS Template)
  * =================================================================================
  * Generic template for any single-sensor puzzle prop (reed switch, button, etc.)
  *
  * Features:
- *   - 100% Non-Blocking State Machine (Zero blocking delays or while-loops)
- *   - Single digital sensor input (Button / Reed Switch / Magnetic Sensor)
- *   - Automatic puzzle start on boot (no laptop/WiFi needed)
- *   - Configurable Active-LOW / Active-HIGH relay trigger logic
- *   - Non-blocking Wi-Fi auto-reconnection & mDNS Zero-IP MQTT broker discovery
- *   - I2C 16x2 LCD Display with I2C bus timeout protection
- *   - Non-blocking hardware reset button debounce
- *   - PubSubClient expanded 512-byte buffer with Last Will and Testament (LWT)
+ *   - Dual-Core Isolation:
+ *       • Core 1 (APP_CPU): 100% dedicated to sensor sampling, relay actuation,
+ *                           hardware reset button, and LCD. Pure hardware determinism
+ *                           with ZERO network code, delays, or blocking.
+ *       • Core 0 (PRO_CPU): Dedicated background network task. Retries Wi-Fi, mDNS, and
+ *                           MQTT indefinitely every 5s with zero impact on the game loop.
+ *   - Thread-Safe Inter-Core Queues (FreeRTOS xQueue):
+ *       • cmdQueue: Transfers incoming GM commands (START, RESET, STOP, SOLVE) to Core 1.
+ *       • telemetryQueue: Posts outgoing state/event changes from Core 1 to Core 0.
+ *   - Automatic power-on puzzle start (works 100% offline even if Wi-Fi/Broker is dead).
+ *   - Configurable Active-LOW / Active-HIGH relay trigger logic.
+ *   - I2C 16x2 LCD Display with I2C bus timeout protection.
+ *   - Non-blocking hardware reset button debounce.
+ *   - PubSubClient expanded 512-byte buffer with Last Will and Testament (LWT).
  *
  * ---------------------------------------------------------------------------------
  * WIRING GUIDE:
@@ -24,21 +30,24 @@
  *   Puzzle Sensor        ---> GPIO 27 (SENSOR_PIN, active LOW, internal pullup)
  *   Reset Button         ---> GPIO 14 (RESET_BTN_PIN, active LOW, internal pullup)
  *
- *   I2C LCD SDA          ---> GPIO 26 (LCD_SDA) [Shared w/ relay? Change if needed]
- *   I2C LCD SCL          ---> GPIO 27 (LCD_SCL) [Shared w/ sensor? Change if needed]
+ *   I2C LCD SDA          ---> GPIO 21 (LCD_SDA_PIN)
+ *   I2C LCD SCL          ---> GPIO 22 (LCD_SCL_PIN)
  *
  * NOTE: Adjust pin assignments below to avoid conflicts for your specific wiring.
  * =================================================================================
  */
 
 #define MQTT_KEEPALIVE 60
-#define MQTT_SOCKET_TIMEOUT 15
+#define MQTT_SOCKET_TIMEOUT 1
 
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <ESPmDNS.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/queue.h>
 
 // =================================================================================
 // 1. HARDWARE CONFIGURATION & PIN DEFINITIONS
@@ -46,8 +55,8 @@
 
 // I2C LCD (Address 0x27, 16 cols, 2 rows) — Comment out LCD lines if not using one
 LiquidCrystal_I2C lcd(0x27, 16, 2);
-const int LCD_SDA_PIN     = 21;  // Default I2C SDA (change to avoid pin conflicts)
-const int LCD_SCL_PIN     = 22;  // Default I2C SCL (change to avoid pin conflicts)
+const int LCD_SDA_PIN     = 21;  // Default I2C SDA
+const int LCD_SCL_PIN     = 22;  // Default I2C SCL
 
 // Sensors & Actuators
 const int RELAY_PIN       = 26;  // Solenoid / Maglock Relay
@@ -67,8 +76,11 @@ const bool AUTO_START_ON_BOOT = true;
 // =================================================================================
 // 2. NETWORK & mDNS / MQTT CONFIGURATION (ZERO-IP SETUP)
 // =================================================================================
-const char* WIFI_SSID     = "Airtel_anjo_4056";
-const char* WIFI_PASS     = "air38409";
+const char* WIFI_SSID     = "operations_404";
+const char* WIFI_PASS     = "Mytplink2020";
+
+// const char* WIFI_SSID     = "Airtel_anjo_4056";
+// const char* WIFI_PASS     = "air38409";
 
 // mDNS Configuration - The ESP32 discovers the server automatically!
 const char* MDNS_HOST_ESCAPEROOM = "escaperoom"; // Will query 'escaperoom.local'
@@ -84,26 +96,40 @@ const char* GAME_ID       = "game1";          // Matches "id" in games.json
 const char* ROOT_TOPIC    = "escaperoom";     // Matches "rootTopic" in games.json
 
 // =================================================================================
-// 3. SYSTEM STATE & MQTT OBJECTS
+// 3. FREE-RTOS DUAL-CORE INTER-THREAD COMMUNICATION & GLOBALS
 // =================================================================================
+
+struct CommandMsg {
+  char cmd[16]; // e.g. "START", "RESTART", "STOP", "RESET", "SOLVE"
+};
+
+struct TelemetryMsg {
+  char kind;     // 'S' = State, 'E' = Event
+  char text[32]; // e.g. "STARTED", "COMPLETED", "FAILED"
+  int attempt;
+};
+
+QueueHandle_t cmdQueue = NULL;
+QueueHandle_t telemetryQueue = NULL;
+TaskHandle_t networkTaskHandle = NULL;
+
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
 
 enum GameState { READY, STARTED, FAILED, COMPLETED, STOPPED };
-GameState currentState = READY;
+volatile GameState currentState = READY;
+volatile int attemptNumber = 0;
 
-int attemptNumber = 0;
-unsigned long lastHeartbeat = 0;
 const unsigned long HEARTBEAT_INTERVAL = 3000; // 3 seconds
 
-// Button Debounce State (non-blocking)
+// Button & Sensor Debounce State (Core 1)
 bool lastResetBtnState = HIGH;
 unsigned long lastResetBtnTime = 0;
 
 bool lastSensorState = HIGH;
 unsigned long lastSensorTime = 0;
 
-// MQTT Topics & Connection Tracking
+// MQTT Topics & Connection Tracking (Core 0)
 char topicStatus[64];
 char topicState[64];
 char topicEvent[64];
@@ -111,16 +137,17 @@ char topicCmd[64];
 
 unsigned long lastMqttRetry = 0;
 unsigned long lastWiFiRetry = 0;
-int mqttFailCount = 0;
-const int MAX_MQTT_ATTEMPTS = 3;     // Max 3 connection attempts before giving up to prevent blocking main thread
-bool mqttOfflineMode = false;       // Set to true after 3 failed attempts (runs 100% offline with zero latency)
+unsigned long lastMdnsRetry = 0;
+bool wasWiFiConnected = false;
 
 // Forward Declarations
+void networkTask(void* pvParameters);
 void setupWiFi();
 void maintainWiFi();
 bool discoverMQTTServer();
 void maintainMQTT();
-void publishStatus(const char* status);
+void postState(GameState state);
+void postEvent(const char* eventName);
 void publishState(GameState state);
 void publishEvent(const char* eventName);
 void handleCommand(String cmd);
@@ -130,7 +157,7 @@ void unlockDoor();
 void checkPuzzleLogic();
 
 // =================================================================================
-// 4. RELAY & ACTUATOR CONTROL
+// 4. RELAY & ACTUATOR CONTROL (Core 1)
 // =================================================================================
 void lockDoor() {
   digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? HIGH : LOW);
@@ -145,51 +172,80 @@ void unlockDoor() {
 }
 
 // =================================================================================
-// 5. MQTT INCOMING COMMAND HANDLER
+// 5. THREAD-SAFE STATE & EVENT POSTING (Core 1 -> Core 0)
 // =================================================================================
-void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  String message = "";
-  for (unsigned int i = 0; i < length; i++) {
-    message += (char)payload[i];
+void postState(GameState state) {
+  const char* stateStr = "READY";
+  switch (state) {
+    case READY:     stateStr = "READY";     break;
+    case STARTED:   stateStr = "STARTED";   break;
+    case FAILED:    stateStr = "FAILED";    break;
+    case COMPLETED: stateStr = "COMPLETED"; break;
+    case STOPPED:   stateStr = "STOPPED";   break;
   }
-  message.trim();
-
-  Serial.printf("📩 [MQTT] Command Received: %s\n", message.c_str());
-  handleCommand(message);
+  if (telemetryQueue != NULL) {
+    TelemetryMsg msg;
+    msg.kind = 'S';
+    strncpy(msg.text, stateStr, sizeof(msg.text) - 1);
+    msg.text[sizeof(msg.text) - 1] = '\0';
+    msg.attempt = attemptNumber;
+    xQueueSend(telemetryQueue, &msg, 0); // Non-blocking
+  }
 }
 
+void postEvent(const char* eventName) {
+  if (telemetryQueue != NULL) {
+    TelemetryMsg msg;
+    msg.kind = 'E';
+    strncpy(msg.text, eventName, sizeof(msg.text) - 1);
+    msg.text[sizeof(msg.text) - 1] = '\0';
+    msg.attempt = attemptNumber;
+    xQueueSend(telemetryQueue, &msg, 0); // Non-blocking
+  }
+}
+
+// Transparent aliases for existing callers
+void publishState(GameState state) {
+  postState(state);
+}
+
+void publishEvent(const char* eventName) {
+  postEvent(eventName);
+}
+
+// =================================================================================
+// 6. COMMAND DISPATCHER (Core 1)
+// =================================================================================
 void handleCommand(String cmd) {
   if (cmd.equalsIgnoreCase("START") || cmd.equalsIgnoreCase("RESTART")) {
     attemptNumber++;
     currentState = STARTED;
     lockDoor();
-    publishState(STARTED);
-    publishEvent("STARTED");
+    postState(STARTED);
+    postEvent("STARTED");
     updateLcdDisplay();
   }
   else if (cmd.equalsIgnoreCase("STOP")) {
     currentState = STOPPED;
     lockDoor();
-    publishState(STOPPED);
-    publishEvent("STOPPED");
+    postState(STOPPED);
+    postEvent("STOPPED");
     updateLcdDisplay();
   }
   else if (cmd.equalsIgnoreCase("RESET")) {
     currentState = READY;
     attemptNumber = 0;
     lockDoor();
-    mqttOfflineMode = false;
-    mqttFailCount = 0;
-    publishState(READY);
-    publishEvent("RESET");
+    postState(READY);
+    postEvent("RESET");
     updateLcdDisplay();
   }
   else if (cmd.equalsIgnoreCase("SOLVE") || cmd.equalsIgnoreCase("OVERRIDE")) {
     Serial.println("🔓 [REMOTE OVERRIDE] Game Master solved puzzle remotely!");
     currentState = COMPLETED;
     unlockDoor();
-    publishState(COMPLETED);
-    publishEvent("COMPLETED");
+    postState(COMPLETED);
+    postEvent("COMPLETED");
 
     lcd.clear();
     lcd.setCursor(0, 0);
@@ -200,7 +256,7 @@ void handleCommand(String cmd) {
 }
 
 // =================================================================================
-// 6. LCD DISPLAY HELPER
+// 7. LCD DISPLAY HELPER (Core 1)
 // =================================================================================
 void updateLcdDisplay() {
   lcd.clear();
@@ -243,7 +299,7 @@ void updateLcdDisplay() {
 }
 
 // =================================================================================
-// 7. PUZZLE SENSOR LOGIC (Non-Blocking)
+// 8. PUZZLE SENSOR LOGIC (Core 1 — Non-Blocking)
 // =================================================================================
 void checkPuzzleLogic() {
   if (currentState != STARTED && currentState != READY) return;
@@ -259,15 +315,15 @@ void checkPuzzleLogic() {
       if (currentState == READY) {
         currentState = STARTED;
         attemptNumber++;
-        publishState(STARTED);
-        publishEvent("STARTED");
+        postState(STARTED);
+        postEvent("STARTED");
       }
 
       Serial.println("🎉 Puzzle Solved! Opening lock...");
       currentState = COMPLETED;
       unlockDoor();
-      publishState(COMPLETED);
-      publishEvent("COMPLETED");
+      postState(COMPLETED);
+      postEvent("COMPLETED");
 
       lcd.clear();
       lcd.setCursor(0, 0);
@@ -280,13 +336,13 @@ void checkPuzzleLogic() {
 }
 
 // =================================================================================
-// 8. SETUP
+// 9. SETUP (Core 1)
 // =================================================================================
 void setup() {
   Serial.begin(115200);
   delay(500);
   Serial.println("\n==========================================");
-  Serial.println("🚀 Escape Room Prop Initializing...");
+  Serial.println("🚀 Escape Room Prop Initializing (Dual-Core)...");
   Serial.println("==========================================");
 
   // Initialize Relay (start locked) & Reset Button
@@ -313,63 +369,64 @@ void setup() {
   snprintf(topicEvent,  sizeof(topicEvent),  "%s/%s/event",  ROOT_TOPIC, GAME_ID);
   snprintf(topicCmd,    sizeof(topicCmd),    "%s/%s/cmd",    ROOT_TOPIC, GAME_ID);
 
-  mqtt.setBufferSize(512);
-  mqtt.setKeepAlive(15);
-  mqtt.setSocketTimeout(1); // 1s socket timeout prevents network connection stalls
+  // Create FreeRTOS Queues for Thread-Safe Inter-Core Communication
+  cmdQueue = xQueueCreate(10, sizeof(CommandMsg));
+  telemetryQueue = xQueueCreate(16, sizeof(TelemetryMsg));
 
-  setupWiFi();
-  mqtt.setCallback(mqttCallback);
+  // Spawn Independent Background Network & MQTT Task on CPU Core 0
+  xTaskCreatePinnedToCore(
+    networkTask,
+    "NetworkTask",
+    8192,
+    NULL,
+    1, // Priority 1 (low, so Core 1 game loop is never preempted)
+    &networkTaskHandle,
+    0  // Core 0
+  );
 
   if (AUTO_START_ON_BOOT) {
     attemptNumber = 1;
     currentState = STARTED;
-    publishState(STARTED);
-    publishEvent("STARTED");
+    postState(STARTED);
+    postEvent("STARTED");
   } else {
     currentState = READY;
-    publishState(READY);
-    publishEvent("READY");
+    postState(READY);
+    postEvent("READY");
   }
 
   updateLcdDisplay();
 }
 
 // =================================================================================
-// 9. MAIN LOOP (100% Non-Blocking & Sensor-Prioritized)
+// 10. MAIN LOOP (Core 1 — 100% Non-Blocking & Pure Sensor Sampling)
 // =================================================================================
 void loop() {
   unsigned long now = millis();
 
-  // 1. PRIORITY #1: Handle Puzzle Sensor Logic FIRST (Zero Latency)
-  checkPuzzleLogic();
-
-  // 2. Maintain Network & MQTT (Skips completely if in offline mode)
-  maintainMQTT();
-
-  // 3. Periodic Heartbeat to Server (Only if connected)
-  if (mqtt.connected() && (now - lastHeartbeat > HEARTBEAT_INTERVAL)) {
-    lastHeartbeat = now;
-    publishEvent("HEARTBEAT");
+  // 1. Process Incoming Commands from Core 0 (Zero-latency queue drain)
+  if (cmdQueue != NULL) {
+    CommandMsg incoming;
+    while (xQueueReceive(cmdQueue, &incoming, 0) == pdTRUE) {
+      handleCommand(String(incoming.cmd));
+    }
   }
 
-  // 4. Non-Blocking Physical Manual Reset Button check
+  // 2. Non-Blocking Physical Manual Reset Button check
   bool currentBtnState = digitalRead(RESET_BTN_PIN);
   if (currentBtnState == LOW && lastResetBtnState == HIGH) {
     if (now - lastResetBtnTime > 250) { // 250ms debounce
       lastResetBtnTime = now;
       Serial.println("🔘 Hardware Reset Pressed");
-      // Allow fresh MQTT attempts on manual reset
-      mqttOfflineMode = false;
-      mqttFailCount = 0;
       handleCommand("RESET");
     }
   }
   lastResetBtnState = currentBtnState;
 
-  // 4. Handle Puzzle Sensor Logic (non-blocking)
+  // 3. PRIORITY #1: Handle Puzzle Sensor Logic (Zero Latency)
   checkPuzzleLogic();
 
-  // 5. Non-blocking Auto-Relock Timer check (for Solenoid locks)
+  // 4. Non-blocking Auto-Relock Timer check (for Solenoid locks)
   if (AUTO_RELOCK_DELAY_MS > 0 && unlockedAt > 0) {
     if (now - unlockedAt >= AUTO_RELOCK_DELAY_MS) {
       Serial.println("⏱️ [RELAY] Auto-relock timer elapsed. Securing door...");
@@ -379,54 +436,69 @@ void loop() {
 }
 
 // =================================================================================
-// 10. NETWORK & MQTT COMMUNICATIONS (With Automatic mDNS Discovery)
+// 11. BACKGROUND NETWORK & MQTT TASK (Core 0 — Independent Thread)
 // =================================================================================
 
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  char message[16];
+  unsigned int len = length < sizeof(message) - 1 ? length : sizeof(message) - 1;
+  memcpy(message, payload, len);
+  message[len] = '\0';
+
+  for (int i = (int)len - 1; i >= 0 && (message[i] == ' ' || message[i] == '\r' || message[i] == '\n'); i--) {
+    message[i] = '\0';
+  }
+
+  Serial.printf("📩 [MQTT Core 0] Command Received: %s\n", message);
+
+  if (cmdQueue != NULL) {
+    CommandMsg msg;
+    strncpy(msg.cmd, message, sizeof(msg.cmd) - 1);
+    msg.cmd[sizeof(msg.cmd) - 1] = '\0';
+    xQueueSend(cmdQueue, &msg, 0);
+  }
+}
+
 bool discoverMQTTServer() {
-  Serial.println("\n🔍 [mDNS] Discovering Escape Room Control Server...");
+  Serial.println("\n🔍 [mDNS Core 0] Discovering Escape Room Control Server...");
 
   if (!MDNS.begin("ESP32-Prop")) {
-    Serial.println("⚠️ [mDNS] Responder init failed, proceeding with queries...");
+    Serial.println("⚠️ [mDNS Core 0] Responder init failed, querying...");
   } else {
-    Serial.println("📡 [mDNS] Responder active ('ESP32-Prop.local')");
+    Serial.println("📡 [mDNS Core 0] Responder active ('ESP32-Prop.local')");
   }
 
   // 1. Try DNS-SD Service Discovery
-  Serial.println("  1️⃣ Scanning for '_mqtt._tcp' service on local network...");
   int n = MDNS.queryService("mqtt", "tcp");
   if (n > 0) {
     activeMqttIP = MDNS.address(0);
     activeMqttPort = MDNS.port(0);
     serverDiscovered = true;
-    Serial.printf("  ✅ [mDNS] Discovered MQTT Service via DNS-SD!\n");
-    Serial.printf("     Broker IP: %s\n", activeMqttIP.toString().c_str());
-    Serial.printf("     Broker Port: %d\n", activeMqttPort);
+    Serial.printf("  ✅ [mDNS Core 0] Discovered via DNS-SD: %s:%d\n", activeMqttIP.toString().c_str(), activeMqttPort);
     mqtt.setServer(activeMqttIP, activeMqttPort);
     return true;
   }
 
   // 2. Try resolving 'escaperoom.local'
-  Serial.printf("  2️⃣ Querying mDNS host '%s.local'...\n", MDNS_HOST_ESCAPEROOM);
   activeMqttIP = MDNS.queryHost(MDNS_HOST_ESCAPEROOM);
   if (activeMqttIP != IPAddress(0, 0, 0, 0)) {
     serverDiscovered = true;
-    Serial.printf("  ✅ [mDNS] Resolved '%s.local' -> %s (Port: %d)\n", MDNS_HOST_ESCAPEROOM, activeMqttIP.toString().c_str(), activeMqttPort);
+    Serial.printf("  ✅ [mDNS Core 0] Resolved '%s.local' -> %s:%d\n", MDNS_HOST_ESCAPEROOM, activeMqttIP.toString().c_str(), activeMqttPort);
     mqtt.setServer(activeMqttIP, activeMqttPort);
     return true;
   }
 
   // 3. Try resolving laptop OS hostname 'pop-os.local'
-  Serial.printf("  3️⃣ Querying mDNS host '%s.local'...\n", MDNS_HOST_LAPTOP);
   activeMqttIP = MDNS.queryHost(MDNS_HOST_LAPTOP);
   if (activeMqttIP != IPAddress(0, 0, 0, 0)) {
     serverDiscovered = true;
-    Serial.printf("  ✅ [mDNS] Resolved '%s.local' -> %s (Port: %d)\n", MDNS_HOST_LAPTOP, activeMqttIP.toString().c_str(), activeMqttPort);
+    Serial.printf("  ✅ [mDNS Core 0] Resolved '%s.local' -> %s:%d\n", MDNS_HOST_LAPTOP, activeMqttIP.toString().c_str(), activeMqttPort);
     mqtt.setServer(activeMqttIP, activeMqttPort);
     return true;
   }
 
-  // 4. Fallback to hardcoded IP if router blocks multicast packets
-  Serial.printf("  ⚠️ [mDNS] Discovery timed out. Using fallback IP: %s:%d\n", MQTT_SERVER_FALLBACK, activeMqttPort);
+  // 4. Fallback to hardcoded IP
+  Serial.printf("  ⚠️ [mDNS Core 0] Using fallback IP: %s:%d\n", MQTT_SERVER_FALLBACK, activeMqttPort);
   activeMqttIP.fromString(MQTT_SERVER_FALLBACK);
   mqtt.setServer(activeMqttIP, activeMqttPort);
   return false;
@@ -435,35 +507,44 @@ bool discoverMQTTServer() {
 void setupWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
-  Serial.print("📶 Connecting to Wi-Fi");
+  Serial.print("📶 [Core 0] Connecting to Wi-Fi");
 
   int retries = 0;
-  while (WiFi.status() != WL_CONNECTED && retries < 15) {
-    delay(200);
+  while (WiFi.status() != WL_CONNECTED && retries < 20) {
+    vTaskDelay(pdMS_TO_TICKS(250));
     Serial.print(".");
     retries++;
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n✅ Wi-Fi Connected!");
+    wasWiFiConnected = true;
+    Serial.println("\n✅ [Core 0] Wi-Fi Connected!");
     Serial.print("   Prop IP Address: ");
     Serial.println(WiFi.localIP());
 
     discoverMQTTServer();
   } else {
-    Serial.println("\n⚠️ Wi-Fi Timeout. Entering 100% standalone offline mode.");
-    mqttOfflineMode = true;
+    Serial.println("\n⚠️ [Core 0] Initial Wi-Fi timeout. Retrying in background continuously...");
   }
 }
 
 void maintainWiFi() {
-  if (mqttOfflineMode) return; // Do not interrupt sensor loop when in standalone offline mode
-
-  if (WiFi.status() != WL_CONNECTED) {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!wasWiFiConnected) {
+      wasWiFiConnected = true;
+      Serial.println("\n✅ [Core 0] Wi-Fi Connected!");
+      Serial.print("   Prop IP Address: ");
+      Serial.println(WiFi.localIP());
+      if (!serverDiscovered) {
+        discoverMQTTServer();
+      }
+    }
+  } else {
+    wasWiFiConnected = false;
     unsigned long now = millis();
-    if (now - lastWiFiRetry > 15000) {
+    if (now - lastWiFiRetry > 10000) {
       lastWiFiRetry = now;
-      Serial.println("📶 [Wi-Fi] Connection lost. Attempting auto-reconnect...");
+      Serial.println("📶 [Core 0] Wi-Fi reconnecting in background...");
       WiFi.disconnect();
       WiFi.begin(WIFI_SSID, WIFI_PASS);
     }
@@ -471,78 +552,102 @@ void maintainWiFi() {
 }
 
 void maintainMQTT() {
-  // If already connected, ALWAYS call mqtt.loop()!
-  // mqtt.loop() is non-blocking (~50us) and processes incoming commands (START, RESET, STOP, SOLVE)
-  if (mqtt.connected()) {
-    mqtt.loop();
-    return;
-  }
-
-  // -----------------------------------------------------------------
-  // ONLY below this line are we disconnected and considering reconnect
-  // -----------------------------------------------------------------
-
-  // If already reached max connection attempts, stay offline without blocking
-  if (mqttOfflineMode) return;
-
-  maintainWiFi();
-
   if (WiFi.status() != WL_CONNECTED) return;
 
-  unsigned long now = millis();
-  if (now - lastMqttRetry > 5000) {
-    lastMqttRetry = now;
-    mqttFailCount++;
+  // If server has not yet been discovered via mDNS, retry discovery periodically
+  if (!serverDiscovered) {
+    unsigned long now = millis();
+    if (now - lastMdnsRetry > 10000) {
+      lastMdnsRetry = now;
+      discoverMQTTServer();
+    }
+  }
 
-    Serial.printf("🔌 [MQTT Attempt %d/%d] Connecting to %s:%d...\n",
-                  mqttFailCount, MAX_MQTT_ATTEMPTS,
+  if (mqtt.connected()) return;
+
+  unsigned long now = millis();
+  if (now - lastMqttRetry > 5000) { // Retries indefinitely every 5s on Core 0!
+    lastMqttRetry = now;
+    Serial.printf("🔌 [Core 0] Connecting to MQTT Broker at %s:%d...\n",
                   activeMqttIP.toString().c_str(), activeMqttPort);
 
     String clientId = "ESP32-Prop-" + String(GAME_ID);
 
-    // Connect with Last Will & Testament (LWT)
     if (mqtt.connect(clientId.c_str(), topicStatus, 1, true, "offline")) {
-      Serial.println("✅ Connected to MQTT Broker!");
-      mqttFailCount = 0;
-      publishStatus("online");
+      Serial.println("✅ [Core 0] Connected to MQTT Broker!");
+      mqtt.publish(topicStatus, "online", true);
       mqtt.subscribe(topicCmd);
-      publishState(currentState);
-    } else {
-      Serial.printf("⚠️ MQTT Connection Failed (rc=%d).\n", mqtt.state());
 
-      if (mqttFailCount >= MAX_MQTT_ATTEMPTS) {
-        mqttOfflineMode = true;
-        Serial.println("🛑 [MQTT] Failed 3 attempts. Stopping network retries permanently!");
-        Serial.println("🎮 100% STANDALONE OFFLINE MODE: Sensor loop given full priority.");
+      // Publish current live state immediately upon reconnect
+      const char* stateStr = "READY";
+      switch (currentState) {
+        case READY:     stateStr = "READY";     break;
+        case STARTED:   stateStr = "STARTED";   break;
+        case FAILED:    stateStr = "FAILED";    break;
+        case COMPLETED: stateStr = "COMPLETED"; break;
+        case STOPPED:   stateStr = "STOPPED";   break;
       }
+      char buf[128];
+      snprintf(buf, sizeof(buf), "{\"state\":\"%s\",\"attempt\":%d}", stateStr, attemptNumber);
+      mqtt.publish(topicState, buf, true);
+    } else {
+      Serial.printf("⚠️ [Core 0] MQTT Failed (rc=%d). Retrying in 5 seconds in background...\n", mqtt.state());
     }
   }
 }
 
-void publishStatus(const char* status) {
-  if (mqtt.connected()) {
-    mqtt.publish(topicStatus, status, true);
-  }
-}
+void networkTask(void* pvParameters) {
+  Serial.printf("🌐 [Core 0] Background Network Task running on Core %d\n", xPortGetCoreID());
 
-void publishState(GameState state) {
-  if (!mqtt.connected()) return;
-  const char* stateStr = "READY";
-  switch (state) {
-    case READY:     stateStr = "READY";     break;
-    case STARTED:   stateStr = "STARTED";   break;
-    case FAILED:    stateStr = "FAILED";    break;
-    case COMPLETED: stateStr = "COMPLETED"; break;
-    case STOPPED:   stateStr = "STOPPED";   break;
-  }
-  char buf[128];
-  snprintf(buf, sizeof(buf), "{\"state\":\"%s\",\"attempt\":%d}", stateStr, attemptNumber);
-  mqtt.publish(topicState, buf, true);
-}
+  mqtt.setBufferSize(512);
+  mqtt.setKeepAlive(15);
+  mqtt.setSocketTimeout(1);
+  mqtt.setCallback(mqttCallback);
 
-void publishEvent(const char* eventName) {
-  if (!mqtt.connected()) return;
-  char buf[128];
-  snprintf(buf, sizeof(buf), "{\"event\":\"%s\",\"attempt\":%d}", eventName, attemptNumber);
-  mqtt.publish(topicEvent, buf, false);
+  setupWiFi();
+
+  unsigned long lastHb = 0;
+
+  while (true) {
+    maintainWiFi();
+    maintainMQTT();
+
+    if (mqtt.connected()) {
+      mqtt.loop();
+
+      // Drain all outgoing telemetry from Core 1
+      if (telemetryQueue != NULL) {
+        TelemetryMsg msg;
+        while (xQueueReceive(telemetryQueue, &msg, 0) == pdTRUE) {
+          if (msg.kind == 'S') {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "{\"state\":\"%s\",\"attempt\":%d}", msg.text, msg.attempt);
+            mqtt.publish(topicState, buf, true);
+          } else if (msg.kind == 'E') {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "{\"event\":\"%s\",\"attempt\":%d}", msg.text, msg.attempt);
+            mqtt.publish(topicEvent, buf, false);
+          }
+        }
+      }
+
+      // Periodic Heartbeat every 3 seconds
+      unsigned long now = millis();
+      if (now - lastHb > HEARTBEAT_INTERVAL) {
+        lastHb = now;
+        char buf[128];
+        snprintf(buf, sizeof(buf), "{\"event\":\"HEARTBEAT\",\"attempt\":%d}", attemptNumber);
+        mqtt.publish(topicEvent, buf, false);
+      }
+    } else {
+      // Offline: drain queue so stale messages don't accumulate while disconnected
+      if (telemetryQueue != NULL) {
+        TelemetryMsg discard;
+        while (xQueueReceive(telemetryQueue, &discard, 0) == pdTRUE);
+      }
+    }
+
+    // Crucial: yield 15ms to FreeRTOS scheduler on Core 0
+    vTaskDelay(pdMS_TO_TICKS(15));
+  }
 }

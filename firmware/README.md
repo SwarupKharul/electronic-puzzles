@@ -17,6 +17,30 @@
 
 ---
 
+## 🧠 Dual-Core FreeRTOS Architecture (Zero Drop / Zero Regression)
+
+All production props use ESP32's dual Xtensa LX6 CPU cores for absolute physical determinism:
+
+```
+┌───────────────────────────────────────┐      ┌───────────────────────────────────────┐
+│       CPU Core 1 (APP_CPU)            │      │       CPU Core 0 (PRO_CPU)            │
+│       Dedicated Prop Real-Time Loop   │      │       Dedicated Background Network    │
+├───────────────────────────────────────┤      ├───────────────────────────────────────┤
+│ • 10,000+ Hz Analog/SPI sensor scans  │      │ • Background Wi-Fi auto-reconnect     │
+│ • Piezo knock ADC & rhythm analysis   │◄─────┼─ cmdQueue (START, RESET, STOP, SOLVE) │
+│ • 4x MFRC522 RFID SPI polling         │      │ • mDNS Zero-IP server discovery       │
+│ • Relay, Servo, Buzzer & LCD updates  │──────┼─► telemetryQueue (Live State/Events)  │
+│ • Physical Hardware Reset Button      │      │ • Infinite MQTT reconnection (every 5s│
+│ • ZERO delays, ZERO network calls!    │      │ • Periodic 3s heartbeats to dashboard │
+└───────────────────────────────────────┘      └───────────────────────────────────────┘
+```
+
+- **Core 1 Never Blocks**: Even if the Wi-Fi router is unplugged or the MQTT broker takes seconds to respond, Core 1 never waits. Players can knock or place RFID tags with 100% responsiveness.
+- **Background Retries Forever**: Core 0 continuously retries connecting to Wi-Fi and MQTT every 5 seconds indefinitely in the background without affecting game responsiveness.
+- **Immediate Game Master Control**: When the dashboard sends commands (`START`, `RESET`, `STOP`, `SOLVE`), Core 0 immediately queues them into `cmdQueue`, and Core 1 executes them on the next loop cycle within microseconds.
+
+---
+
 ## 🛠 Arduino IDE Required Libraries
 
 Install all 5 libraries using **Arduino IDE ➔ Tools ➔ Manage Libraries...**:

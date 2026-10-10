@@ -20,11 +20,12 @@
 
 ## 🖥 Quick Access URLs
 
-| Device | URL | Audio Behavior |
+| **Device** | **URL** | **Audio Behavior** |
 | :--- | :--- | :--- |
 | **Main Control Laptop** | `http://localhost:3000` or `http://escaperoom.local:3000` | Full Web Audio (SFX, fanfares, music) |
 | **GM Handheld Tablet / Phone** | `http://<laptop-ip>:3000/?audio=off` | Silent telemetry monitor (saves battery, no audio bleed) |
 | **Single Prop Dedicated Screen** | `http://<laptop-ip>:3000/?game=game2` | Focused monitor for 4-RFID Dolls puzzle only |
+| **Coins Prop Dedicated Screen** | `http://<laptop-ip>:3000/?game=game3` | Focused monitor for 4-RFID Coins puzzle only |
 
 *(Note: `<laptop-ip>` is displayed in the server terminal upon launch, e.g. `192.168.1.9`).*
 
@@ -40,13 +41,15 @@ Execute this 5-minute routine before welcoming every player team:
 [ ] 3. Open Browser Dashboard: Go to http://localhost:3000.
 [ ] 4. Click 'Enable Audio' in the top header. Test with '🔊 success' button.
 [ ] 5. Power ON all physical props in the rooms.
-[ ] 6. Verify Dashboard: Both props must display green 'LIVE' status pills within 5 seconds.
+[ ] 6. Verify Dashboard: All props must display green 'LIVE' status pills within 5 seconds.
 [ ] 7. Physical Room Reset:
        - Dolls Puzzle: All 4 dolls removed from slots; maglock/door closed and locked.
+       - Coins Puzzle: All 4 coins removed from slots; compartment/door closed and locked.
        - Knock Puzzle: Piezo surface clear; door closed and locked.
 [ ] 8. Verify LCD Displays:
        - Game 1 LCD: 'READY TO KNOCK' or 'ATTEMPT #1'
        - Game 2 LCD: 'DOLLS: 0/4 READY'
+       - Game 3 LCD: 'COINS: 0/4 READY'
 [ ] 9. Click '▶ Start' or '⟲ Reset' on dashboard to sync session clock.
 ```
 
@@ -61,7 +64,7 @@ Execute this 5-minute routine before welcoming every player team:
   2. Confirm the prompt: *"Emergency Override: Force solve and unlock...?"*
   3. **Result:**
      - The relay energizes and solenoid/maglock unlocks immediately.
-     - The servo arm rotates to 180° (unlocked).
+     - The servo arm rotates to 90° (unlocked).
      - The prop LCD displays `PUZZLE SOLVED! DOOR UNLOCKED`.
      - The dashboard plays the victory sound and marks the card as **SUCCESS**.
 
@@ -91,6 +94,11 @@ Execute this 5-minute routine before welcoming every player team:
     - Check the prop LCD display. It shows live placement: `D1:OK D2:OK D3:-- D4:OK`.
     - If one slot shows `--` or `?`, the doll's RFID tag is slightly off-center or lifted.
     - Ask players over intercom: *"Make sure all 4 dolls are seated squarely on their pedestals."*
+  - **Coins Puzzle (Game 3):**
+    - Check the prop LCD display. It shows slot state: `1:O 2:O 3:. 4:O`.
+    - Remember: evaluation triggers **only when all 4 coins are placed (4/4 present)**.
+    - If LCD shows `WRONG ORDER! TRY AGAIN...`, coins are placed in the wrong slots.
+    - Ask players over intercom: *"Ensure all 4 coins are seated firmly in their designated slots."*
   - **Knock Puzzle (Game 1):**
     - The pattern expects rhythmic knocks: `knock-knock _ knock-knock-knock-knock _ knock` (7 knocks total).
     - **Tolerances:**
@@ -141,6 +149,7 @@ Follow this 2-minute reset procedure between booking groups:
 1. **Step 1: Physical Props**
    - **Game 1 (Knock Prop):** Close puzzle door/box firmly. Verify magnetic lock engages.
    - **Game 2 (Dolls Prop):** Remove all 4 dolls from the pedestals and return them to their hidden starting locations. Close and latch the prop door/compartment.
+   - **Game 3 (Coins Prop):** Remove all 4 coins from the slots and return them to their hidden puzzle locations. Close and latch coin compartment/drawer.
 2. **Step 2: Dashboard Reset**
    - Click the header button: **`⟲ Reset All`**.
    - Confirm the dialog.
@@ -183,7 +192,7 @@ Follow this 2-minute reset procedure between booking groups:
 | **`↻ Restart`** | Orange | `RESTART` | Increments attempt counter, clears errors, re-scans physical sensors fresh. |
 | **`⏹ Stop`** | Red | `STOP` | Suspends puzzle evaluation and locks actuator. |
 | **`⟲ Reset`** | Gray | `RESET` | Restores prop to **`READY`** state; locks door and sets servo to 0°. |
-| **`⚡ Force Solve`**| Emerald | `SOLVE` | **Emergency Override:** Unlocks relay and moves servo to 180° immediately. |
+| **`⚡ Force Solve`**| Emerald | `SOLVE` | **Emergency Override:** Unlocks relay and moves servo to 90° immediately. |
 | **`🩺 Debug`** | Slate | Local UI | Expands telemetry drawer showing live heartbeat count and signal latency. |
 
 ---

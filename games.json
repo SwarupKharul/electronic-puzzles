@@ -10,6 +10,11 @@
       "id": "game2",
       "name": "Dolls Puzzle",
       "description": "4-RFID dolls placement puzzle prop"
+    },
+    {
+      "id": "game3",
+      "name": "Coins Puzzle Prop",
+      "description": "4-RFID coins positional placement puzzle prop"
     }
   ]
 }

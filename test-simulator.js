@@ -25,7 +25,8 @@ let config = {
   rootTopic: "escaperoom",
   games: [
     { id: "game1", name: "Knock Puzzle Prop" },
-    { id: "game2", name: "Dolls Puzzle" }
+    { id: "game2", name: "Dolls Puzzle" },
+    { id: "game3", name: "Coins Puzzle Prop" }
   ]
 };
 

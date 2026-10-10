@@ -1,0 +1,14 @@
+# 🛒 Hardware Parts Checklist (Escape Room Master Props)
+
+## Game 3: 4-RFID Coins Prop
+- [ ] ESP32 DevKit V1 (30-pin or 38-pin) x1
+- [ ] ESP32 Expansion Shield / Breakout Board (with screw terminals) x1
+- [ ] MFRC522 13.56 MHz RFID Reader Modules x4
+- [ ] 13.56 MHz RFID Adhesive Coin Stickers / Tags (NTAG213 or Mifare Classic 1K, ~25mm) x4 (or pack of 10)
+- [ ] Servo Motors (MG90S metal-gear recommended, or SG90) x3
+- [ ] 5V Relay Module (Optocoupled, Active-LOW) x1
+- [ ] 16x2 I2C Character LCD Display (with PCF8574 backpack) x1
+- [ ] Piezo Buzzer (5V) x1
+- [ ] Push Button (for hardware reset) x1
+- [ ] 5V 3A DC Power Supply Adapter (provides dedicated current for 3 servos + ESP32) x1
+- [ ] Breadboard / Prototype PCB + Dupont jumper wires (M-F, F-F)

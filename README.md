@@ -42,7 +42,7 @@
 This system is engineered specifically for live commercial escape rooms where delays, network jitter, or crashes break immersion.
 
 ### 1. 100% Local Hardware Autonomy (Fail-Safe Offline Operation)
-- **Zero Network Dependency for Solving:** Sensor scanning (RFID SPI, Piezo ADC), rhythm evaluation, and physical lock actuation (Relay energize, Servo rotation to 180°) happen **directly on the ESP32 hardware loop**.
+- **Zero Network Dependency for Solving:** Sensor scanning (RFID SPI, Piezo ADC), rhythm evaluation, and physical lock actuation (Relay energize, Servo actuation) happen **directly on the ESP32 hardware loop**.
 - **Network Failure Immunity:** If Wi-Fi drops, the laptop goes to sleep, or the router restarts, **players can still solve the puzzle physically and the door will unlock immediately (<10ms)**.
 - **Non-Blocking Architecture:** Network calls never block the main sensor polling loop (`loop()` runs smoothly at >50Hz).
 
@@ -73,13 +73,16 @@ This system is engineered specifically for live commercial escape rooms where de
 ```
 ├── audio/                      # Audio assets organized by game ID
 │   ├── game1/                  # Knock prop sound effects (start, failed, success, etc.)
-│   └── game2/                  # Dolls puzzle sound effects
+│   ├── game2/                  # Dolls puzzle sound effects
+│   └── game3/                  # Coins puzzle sound effects
 ├── dist/                       # Production-compiled React frontend (built by Vite)
 ├── firmware/                   # Arduino / ESP32 C++ firmware sketches
 │   ├── knock_knock_game/       # Game 1: Secret rhythm piezo sensor prop
 │   │   └── knock_knock_game.ino
 │   ├── rfid_dolls/             # Game 2: 4-RFID dolls placement prop
 │   │   └── rfid_dolls.ino
+│   ├── rfid_coins/             # Game 3: 4-RFID coins placement prop
+│   │   └── rfid_coins.ino
 │   ├── game_esp32_simulator/   # Hardware simulator sketch for bare ESP32s
 │   │   └── game_esp32_simulator.ino
 │   └── game_esp32_mqtt.ino     # Boilerplate template for building new props
@@ -172,9 +175,10 @@ You can simulate any prop, event, or failure state without physical hardware:
 node test-simulator.js
 
 # Instant CLI Commands:
+node test-simulator.js game3 SUCCESS    # Trigger victory on Coins prop
 node test-simulator.js game2 SUCCESS    # Trigger victory on Dolls prop
 node test-simulator.js game1 FAILED     # Trigger failed rhythm on Knock prop
-node test-simulator.js game2 offline    # Test offline detection
+node test-simulator.js game3 offline    # Test offline detection
 node test-simulator.js all RESET        # Reset all props to READY
 ```
 

@@ -11,6 +11,7 @@
 | :--- | :--- | :--- |
 | [`knock_knock_game/`](file:///home/swarup/Downloads/escaperoommaster/claude/v2/firmware/knock_knock_game/knock_knock_game.ino) | **Game 1**: Secret knock rhythm sensor with piezo transducer, I2C LCD, and 12V lock relay. | ESP32 + Piezo Sensor |
 | [`rfid_dolls/`](file:///home/swarup/Downloads/escaperoommaster/claude/v2/firmware/rfid_dolls/rfid_dolls.ino) | **Game 2**: 4-station RFID puzzle. Players place 4 matching dolls on RFID pedestals. Includes Servo + Relay. | ESP32 + 4x RC522 Readers |
+| [`rfid_coins/`](file:///home/swarup/Downloads/escaperoommaster/claude/v2/firmware/rfid_coins/rfid_coins.ino) | **Game 3**: 4-station RFID coins puzzle. Positional placement of 4 RFID-tagged coins with multi-servo + relay. | ESP32 + 4x RC522 Readers |
 | [`knock_pattern_recorder/`](file:///home/swarup/Downloads/escaperoommaster/claude/v2/firmware/knock_pattern_recorder/knock_pattern_recorder.ino) | Calibration utility to record custom knock intervals via Serial Monitor. | ESP32 + Piezo Sensor |
 | [`game_esp32_mqtt/`](file:///home/swarup/Downloads/escaperoommaster/claude/v2/firmware/game_esp32_mqtt/game_esp32_mqtt.ino) | Clean boilerplate template for building any new custom IoT escape room prop. | Generic ESP32 |
 | [`game_esp32_simulator/`](file:///home/swarup/Downloads/escaperoommaster/claude/v2/firmware/game_esp32_simulator/game_esp32_simulator.ino) | Bare ESP32 simulator sketch for hardware stress-testing without sensors connected. | Generic ESP32 |
@@ -94,12 +95,48 @@ Each reader has its own dedicated Chip Select pin:
 ### Actuators & Display Wiring
 | Component | ESP32 GPIO | Notes |
 | :--- | :--- | :--- |
-| **Servo Motor (SIG)** | `GPIO 13` | 0° = Locked / Standby, 180° = Unlocked |
-| **Lock Relay (IN)** | `GPIO 25` | Active-LOW relay signal pin |
+| **Servo Motor (SIG)** | `GPIO 13` | 0° = Locked / Standby, 90° = Unlocked (anticlockwise rotation) |
+| **Lock Relay (IN)** | `GPIO 25` | Active-LOW relay signal pin (12V Maglock/Solenoid) |
+| **Red Light Relay (IN)** | `GPIO 33` | Active-LOW relay signal pin (AC/DC Red Lights on incorrect attempt) |
 | **I2C LCD (SDA)** | `GPIO 26` | 16x2 LCD display (Address `0x27`) |
 | **I2C LCD (SCL)** | `GPIO 27` | 16x2 LCD clock line |
 | **Piezo Buzzer** | `GPIO 32` | Local feedback beeps on RFID card scans |
 | **Reset Button** | `GPIO 14` | Optional manual override button |
+
+---
+
+## 📌 Game 3: 4-RFID Coins Positional Placement (`rfid_coins.ino`)
+
+### Shared SPI Bus Wiring (All 4 Readers)
+All 4 RC522 RFID readers share the same SPI bus lines:
+| RFID Pin | ESP32 GPIO | Notes |
+| :--- | :--- | :--- |
+| **SCK** | `GPIO 18` | Shared across all 4 readers |
+| **MISO** | `GPIO 19` | Shared across all 4 readers |
+| **MOSI** | `GPIO 23` | Shared across all 4 readers |
+| **RST** | `GPIO 22` | Shared reset line across all 4 readers |
+| **3.3V** | `3V3` | **Strictly 3.3V!** Do not use 5V for RC522. |
+| **GND** | `GND` | Common ground |
+
+### Individual Reader Select (SS / CS) Pins
+| Reader # | Role / Coin Slot | ESP32 GPIO |
+| :--- | :--- | :--- |
+| **Reader 1** | Coin Slot 1 | `GPIO 15` |
+| **Reader 2** | Coin Slot 2 | `GPIO 4` |
+| **Reader 3** | Coin Slot 3 | `GPIO 16` |
+| **Reader 4** | Coin Slot 4 | `GPIO 17` |
+
+### Actuators & Multi-Servo Wiring
+| Component | ESP32 GPIO | Notes |
+| :--- | :--- | :--- |
+| **Servo 1 (SIG)** | `GPIO 13` | Primary lock latch (0° locked ➔ 90° unlocked) |
+| **Servo 2 (SIG)** | `GPIO 33` | Secondary actuator (coin drawer / compartment) |
+| **Servo 3 (SIG)** | `GPIO 12` | Tertiary actuator (trapdoor / reveal) |
+| **Lock Relay (IN)**| `GPIO 25` | Active-LOW relay signal pin |
+| **I2C LCD (SDA)** | `GPIO 26` | 16x2 LCD display (Address `0x27`) |
+| **I2C LCD (SCL)** | `GPIO 27` | 16x2 LCD clock line |
+| **Piezo Buzzer**  | `GPIO 32` | Success & error tone feedback |
+| **Reset Button**  | `GPIO 14` | Optional manual override button |
 
 ---
 

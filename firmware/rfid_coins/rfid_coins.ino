@@ -1,25 +1,28 @@
 /*
  * =================================================================================
- * ESCAPE ROOM - 4 RFID DOLLS PUZZLE (Dual-Core FreeRTOS Architecture)
+ * ESCAPE ROOM - 4 RFID COINS POSITIONAL PUZZLE (Dual-Core FreeRTOS Architecture)
  * =================================================================================
  * Features:
  *   - Dual-Core Isolation:
- *       • Core 1 (APP_CPU): 100% dedicated to 4x MFRC522 RFID SPI scanning, servo,
- *                           relay, buzzer, and LCD. Pure hardware determinism with
- *                           ZERO network code, delays, or blocking.
- *       • Core 0 (PRO_CPU): Dedicated background network task. Retries Wi-Fi, mDNS, and
- *                           MQTT indefinitely every 5s with zero impact on card scanning.
+ *       • Core 1 (APP_CPU): 100% dedicated to 4x MFRC522 RFID SPI scanning,
+ *                           up to 3x servo motors, relay, buzzer, and 16x2 LCD.
+ *                           Pure hardware determinism with ZERO network code or blocking.
+ *       • Core 0 (PRO_CPU): Dedicated background network task. Retries Wi-Fi, mDNS,
+ *                           and MQTT indefinitely every 5s with zero impact on card scanning.
  *   - Thread-Safe Inter-Core Queues (FreeRTOS xQueue):
  *       • cmdQueue: Transfers incoming GM commands (START, RESET, STOP, SOLVE) to Core 1.
  *       • telemetryQueue: Posts outgoing state/event changes from Core 1 to Core 0.
- *   - Automatic power-on puzzle start (works 100% offline even if Wi-Fi/Broker is dead).
- *   - Supports 4x MFRC522 RFID Readers on a shared SPI bus with dedicated SS pins.
- *   - Dynamic card-swap detection (evaluates even if cards swapped without lifting).
+ *   - Positional Matching Logic (Option B):
+ *       • Players place 4 coins into 4 designated slots/receptacles in any time order.
+ *       • Evaluation triggers ONLY when all 4 coins are placed (4/4 present).
+ *       • Slot 1 must hold Coin 1, Slot 2 must hold Coin 2, Slot 3 must hold Coin 3, Slot 4 must hold Coin 4.
+ *       • If correct: Unlocks relay, rotates servos to 90°, plays victory chime.
+ *       • If incorrect: Triggers FAILED event, plays error buzz, allows players to rearrange coins.
+ *   - Multi-Servo Actuation: Controls up to 3 servo motors (e.g. coin drawer, lock latch, compartment).
+ *   - Dynamic card-swap detection (evaluates even if coins swapped without lifting).
  *   - Automated MFRC522 PCD register self-healing & antenna gain optimization.
- *   - Servo motor actuation (0° reset/locked -> 90° solved/unlocked, anticlockwise).
  *   - Configurable Active-LOW / Active-HIGH relay trigger logic for Solenoid / Maglock.
  *   - I2C 16x2 LCD Display with I2C bus timeout protection against noise lockups.
- *   - Non-blocking hardware reset button debouncing.
  *   - PubSubClient expanded 512-byte buffer with Last Will and Testament (LWT).
  *
  * ---------------------------------------------------------------------------------
@@ -34,16 +37,16 @@
  *      3.3V             --->   3.3V (Ensure clean, sufficient current supply!)
  *      GND              --->   GND
  *
- *      [Reader 1 (Doll 1 - Blue)]
+ *      [Reader 1 (Coin Slot 1)]
  *      SDA / SS / CS    --->   GPIO 15 (SS1)
  *
- *      [Reader 2 (Doll 2 - Orange)]
+ *      [Reader 2 (Coin Slot 2)]
  *      SDA / SS / CS    --->   GPIO 4  (SS2)
  *
- *      [Reader 3 (Doll 3 - Yellow)]
+ *      [Reader 3 (Coin Slot 3)]
  *      SDA / SS / CS    --->   GPIO 16 (SS3)
  *
- *      [Reader 4 (Doll 4 - Red)]
+ *      [Reader 4 (Coin Slot 4)]
  *      SDA / SS / CS    --->   GPIO 17 (SS4)
  *
  * 2. I2C 16x2 LCD DISPLAY:
@@ -57,21 +60,14 @@
  *      GND              --->   GND
  *      IN / SIG / S     --->   GPIO 25 (RELAY_PIN)
  *
- * 4. RED LIGHT RELAY MODULE (Incorrect Attempt Indicator - AC or DC):
- *      VCC              --->   VIN (5V)
- *      GND              --->   GND
- *      IN / SIG / S     --->   GPIO 33 (FAIL_RELAY_PIN)
- *      COM (Common)     --->   AC Live / Hot (from mains / wall plug)
- *      NO (Norm. Open)  --->   AC Live to Red Light fixture
- *      AC Neutral (N)   --->   Direct to Red Light fixture Neutral
- *      [SAFETY: Always enclose 110V/220V AC relay terminals in an insulated box!]
+ * 4. SERVO MOTORS (Up to 3 Servos for Locking / Drawers / Hatches):
+ *      Servo 1 (Main Lock)   --->   GPIO 13 (SERVO1_PIN)
+ *      Servo 2 (Drawer/Box)  --->   GPIO 33 (SERVO2_PIN, or -1 to disable)
+ *      Servo 3 (Trapdoor)    --->   GPIO 12 (SERVO3_PIN, or -1 to disable)
+ *      VCC (Red)             --->   External 5V (2A+ Power Supply recommended!)
+ *      GND (Brown/Black)     --->   Common GND
  *
- * 5. SERVO MOTOR (Mechanism / Lock Actuator):
- *      VCC (Red)        --->   VIN (5V External / Board 5V)
- *      GND (Brown/Black)--->   GND (Common Ground)
- *      PWM (Orange/Yel) --->   GPIO 13 (SERVO_PIN)
- *
- * 6. PHYSICAL HARDWARE BUTTON & BUZZER:
+ * 5. PHYSICAL HARDWARE BUTTON & BUZZER:
  *      Reset Button     --->   GPIO 14 (Active LOW to GND, internal pullup)
  *      Piezo Buzzer     --->   GPIO 32 (Positive to Pin, Negative to GND, -1 to disable)
  * =================================================================================
@@ -103,10 +99,10 @@
 #define RFID_RST   22
 
 // RFID Slave Select (SS / CS) Pins for the 4 Readers
-#define SS1 15  // Reader 1 - Doll 1 (Blue)
-#define SS2 4   // Reader 2 - Doll 2 (Orange)
-#define SS3 16  // Reader 3 - Doll 3 (Yellow)
-#define SS4 17  // Reader 4 - Doll 4 (Red)
+#define SS1 15  // Reader 1 - Coin 1
+#define SS2 4   // Reader 2 - Coin 2
+#define SS3 16  // Reader 3 - Coin 3
+#define SS4 17  // Reader 4 - Coin 4
 
 // I2C LCD Pins (16x2)
 #define LCD_SDA 26
@@ -114,23 +110,19 @@
 #define LCD_I2C_ADDR 0x27
 
 // Relay & Actuator Pins
-#define RELAY_PIN      25 // Solenoid / Maglock Relay (Door Lock)
-#define FAIL_RELAY_PIN 33 // Red Light Relay for Incorrect Attempts (-1 to disable)
-#define SERVO_PIN      13 // Servo Motor Signal Pin (-1 to disable)
+#define RELAY_PIN      25 // Solenoid / Maglock Relay
+#define SERVO1_PIN     13 // Primary Servo Motor Pin (-1 to disable)
+#define SERVO2_PIN     33 // Secondary Servo Motor Pin (-1 to disable)
+#define SERVO3_PIN     12 // Tertiary Servo Motor Pin (-1 to disable)
 #define RESET_BTN_PIN  14 // Optional manual reset button (active LOW)
 #define BUZZER_PIN     32 // Optional local piezo buzzer (-1 to disable)
 
 // Servo Motor Positions (Degrees)
 const int SERVO_LOCKED_POS   = 0;   // 0° when reset / standby / locked
-const int SERVO_UNLOCKED_POS = 90;  // 90° when puzzle is solved / unlocked (anticlockwise 90° rotation)
+const int SERVO_UNLOCKED_POS = 90;  // 90° when puzzle is solved / unlocked
 
 // Relay Trigger Logic (Most 3-pin relay modules are ACTIVE-LOW)
-const bool RELAY_ACTIVE_LOW      = true;
-const bool FAIL_RELAY_ACTIVE_LOW = true; // Set false if your relay module is Active-HIGH
-
-// Duration to illuminate Red Lights on incorrect attempt (milliseconds)
-const unsigned long FAIL_RED_LIGHT_DURATION_MS = 3000; // 3 seconds
-unsigned long failLightTurnOffTime = 0;
+const bool RELAY_ACTIVE_LOW = true;
 
 // Auto-relock pulse duration in milliseconds (0 = stays unlocked until RESET)
 const unsigned long AUTO_RELOCK_DELAY_MS = 0;
@@ -149,7 +141,7 @@ const char* WIFI_PASS     = "Mytplink2020";
 // const char* WIFI_PASS     = "air38409";
 
 // mDNS Configuration - The ESP32 discovers the server automatically!
-const char* MDNS_HOST_ESCAPEROOM = "escaperoom"; // Will query 'escaperoom.local'
+const char* MDNS_HOST_ESCAPEROOM = "escaperoom"; // Queries 'escaperoom.local'
 const char* MDNS_HOST_LAPTOP     = "pop-os";     // Native Linux hostname fallback
 const char* MQTT_SERVER_FALLBACK = "192.168.1.9"; // Fallback only if router blocks multicast
 
@@ -158,28 +150,29 @@ int         activeMqttPort       = MQTT_PORT_DEFAULT;
 IPAddress   activeMqttIP;
 bool        serverDiscovered     = false;
 
-const char* GAME_ID       = "game2";          // Matches "id" in games.json ("game2")
+const char* GAME_ID       = "game3";          // Matches "id" in games.json ("game3")
 const char* ROOT_TOPIC    = "escaperoom";     // Matches "rootTopic" in games.json
 
 // =================================================================================
-// 3. TARGET PATTERN / EXPECTED UIDs (CONFIGURABLE)
+// 3. TARGET PATTERN / EXPECTED UIDs FOR 4 COINS
 // =================================================================================
-
+// Replace these dummy byte arrays with the actual 4-byte or 7-byte UIDs of your
+// RFID coin stickers (printed to Serial monitor when you first tap them).
 const byte NUM_READERS = 4;
 const byte SS_PINS[NUM_READERS] = { SS1, SS2, SS3, SS4 };
-const byte EXPECTED_UID_SIZE = 7;
+const byte EXPECTED_UID_SIZE = 7; // Supports 4 or 7 bytes (Mifare Classic or NTAG213)
 
-// Expected UID for Slot 1 (Doll 1 - Blue)
-byte expectedUID1[EXPECTED_UID_SIZE] = { 0x04, 0xC4, 0xE4, 0x49, 0xBC, 0x2A, 0x81 };
+// Expected UID for Slot 1 (Coin 1)
+byte expectedUID1[EXPECTED_UID_SIZE] = { 0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66 };
 
-// Expected UID for Slot 2 (Doll 2 - Orange)
-byte expectedUID2[EXPECTED_UID_SIZE] = { 0x04, 0x7C, 0xE7, 0x49, 0xBC, 0x2A, 0x81 };
+// Expected UID for Slot 2 (Coin 2)
+byte expectedUID2[EXPECTED_UID_SIZE] = { 0x04, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77 };
 
-// Expected UID for Slot 3 (Doll 3 - Yellow)
-byte expectedUID3[EXPECTED_UID_SIZE] = { 0x04, 0xC8, 0xBB, 0x7A, 0xC1, 0x2A, 0x81 };
+// Expected UID for Slot 3 (Coin 3)
+byte expectedUID3[EXPECTED_UID_SIZE] = { 0x04, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88 };
 
-// Expected UID for Slot 4 (Doll 4 - Red)
-byte expectedUID4[EXPECTED_UID_SIZE] = { 0x04, 0x66, 0xE7, 0x49, 0xBC, 0x2A, 0x81 };
+// Expected UID for Slot 4 (Coin 4)
+byte expectedUID4[EXPECTED_UID_SIZE] = { 0x04, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99 };
 
 const byte* expectedUIDs[NUM_READERS] = {
     expectedUID1,
@@ -189,10 +182,10 @@ const byte* expectedUIDs[NUM_READERS] = {
 };
 
 const char* readerNames[NUM_READERS] = {
-    "DOLL 1 (BLUE)",
-    "DOLL 2 (ORANGE)",
-    "DOLL 3 (YELLOW)",
-    "DOLL 4 (RED)"
+    "COIN 1 (SLOT 1)",
+    "COIN 2 (SLOT 2)",
+    "COIN 3 (SLOT 3)",
+    "COIN 4 (SLOT 4)"
 };
 
 // =================================================================================
@@ -214,7 +207,9 @@ QueueHandle_t telemetryQueue = NULL;
 TaskHandle_t networkTaskHandle = NULL;
 
 LiquidCrystal_I2C lcd(LCD_I2C_ADDR, 16, 2);
-Servo puzzleServo;
+Servo servo1;
+Servo servo2;
+Servo servo3;
 
 MFRC522 readers[NUM_READERS] = {
     MFRC522(SS1, RFID_RST),
@@ -223,7 +218,7 @@ MFRC522 readers[NUM_READERS] = {
     MFRC522(SS4, RFID_RST)
 };
 
-// Card Detection States (Core 1)
+// Coin Detection States (Core 1)
 bool cardPresent[NUM_READERS]        = { false, false, false, false };
 byte detectedUID[NUM_READERS][10];
 byte detectedUIDSize[NUM_READERS]    = { 0, 0, 0, 0 };
@@ -279,11 +274,9 @@ void checkAllCards();
 void evaluatePattern();
 void handleSuccess();
 void handleFailure();
-void lockDoor();
-void unlockDoor();
-void turnOnFailLight();
-void turnOffFailLight();
-void moveServo(int angle);
+void lockAllActuators();
+void unlockAllActuators();
+void moveServos(int angle);
 void triggerLocalBuzzer(bool success);
 void updateLcdDisplay();
 void showPuzzleStatus();
@@ -293,55 +286,42 @@ void printUIDInline(const byte* uid, byte size);
 void recoverReader(byte readerIdx);
 
 // =================================================================================
-// 5. RELAY & ACTUATOR CONTROL (Relays + Servo Motor)
+// 5. RELAY & MULTI-SERVO ACTUATOR CONTROL
 // =================================================================================
 
-void turnOnFailLight() {
-    if (FAIL_RELAY_PIN >= 0) {
-        digitalWrite(FAIL_RELAY_PIN, FAIL_RELAY_ACTIVE_LOW ? LOW : HIGH);
-        failLightTurnOffTime = millis() + FAIL_RED_LIGHT_DURATION_MS;
-        Serial.println("🚨 [RELAY 2] Red Lights ON (Incorrect pattern attempt)");
+void moveServos(int angle) {
+    if (SERVO1_PIN >= 0) {
+        servo1.write(angle);
     }
+    if (SERVO2_PIN >= 0) {
+        servo2.write(angle);
+    }
+    if (SERVO3_PIN >= 0) {
+        servo3.write(angle);
+    }
+    Serial.printf("⚙️ [SERVOS] Position set to %d° across active servos\n", angle);
 }
 
-void turnOffFailLight() {
-    if (FAIL_RELAY_PIN >= 0) {
-        digitalWrite(FAIL_RELAY_PIN, FAIL_RELAY_ACTIVE_LOW ? HIGH : LOW);
-        failLightTurnOffTime = 0;
-        Serial.println("💡 [RELAY 2] Red Lights OFF");
-    }
-}
-
-void moveServo(int angle) {
-    if (SERVO_PIN >= 0) {
-        puzzleServo.write(angle);
-        Serial.printf("⚙️ [SERVO] Position set to %d°\n", angle);
-    }
-}
-
-void lockDoor() {
+void lockAllActuators() {
     digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? HIGH : LOW);
-    turnOffFailLight(); // Ensure failure lights are off when locking/resetting
-    moveServo(SERVO_LOCKED_POS); // Reset servo back to 0°
+    moveServos(SERVO_LOCKED_POS); // Reset servos back to 0°
     unlockedAt = 0;
-    Serial.println("🔒 [ACTUATOR] Locked (Relay DE-ENERGIZED, Servo at 0°)");
+    Serial.println("🔒 [ACTUATOR] Locked (Relay DE-ENERGIZED, Servos at 0°)");
 }
 
-void unlockDoor() {
-    turnOffFailLight(); // Turn off any red lights upon victory
+void unlockAllActuators() {
     digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? LOW : HIGH);
-    moveServo(SERVO_UNLOCKED_POS); // Move servo to 90° on puzzle solve (anticlockwise)
+    moveServos(SERVO_UNLOCKED_POS); // Move servos to 90°
     unlockedAt = millis();
-    Serial.println("🔓 [ACTUATOR] Unlocked (Relay ENERGIZED, Servo at 90°)");
+    Serial.println("🔓 [ACTUATOR] Unlocked (Relay ENERGIZED, Servos at 90°)");
 }
 
 void triggerLocalBuzzer(bool success) {
     if (BUZZER_PIN < 0) return;
-    // Non-blocking: tone() duration parameter handles auto-stop without delay()
     if (success) {
-        tone(BUZZER_PIN, 1400, 300); // Single celebratory tone (no blocking delay)
+        tone(BUZZER_PIN, 1500, 350); // Celebratory success chirp
     } else {
-        tone(BUZZER_PIN, 250, 400);  // Low failure buzz
+        tone(BUZZER_PIN, 250, 450);  // Low failure buzz
     }
 }
 
@@ -441,9 +421,9 @@ bool scanReader(byte readerIdx) {
             }
 
             if (uidChanged && cardPresent[readerIdx]) {
-                // Card was swapped without leaving reader empty
+                // Coin was swapped without leaving slot empty
                 patternEvaluated = false;
-                Serial.printf("🔄 Reader %d [%s]: Card SWAPPED! New UID: ", readerIdx + 1, readerNames[readerIdx]);
+                Serial.printf("🔄 Slot %d [%s]: Coin SWAPPED! New UID: ", readerIdx + 1, readerNames[readerIdx]);
                 printUID(detectedUID[readerIdx], detectedUIDSize[readerIdx]);
             }
 
@@ -463,10 +443,10 @@ bool scanReader(byte readerIdx) {
 }
 
 // =================================================================================
-// 7. PATTERN EVALUATION & CORE LOGIC
+// 7. POSITIONAL PATTERN EVALUATION (Option B: Checked ONLY when 4/4 coins placed)
 // =================================================================================
 
-int getCardsPresentCount() {
+int getCoinsPresentCount() {
     int count = 0;
     for (byte i = 0; i < NUM_READERS; i++) {
         if (cardPresent[i]) count++;
@@ -487,7 +467,7 @@ void checkAllCards() {
                 cardPresent[i] = true;
                 cardStateChanged = true;
                 patternEvaluated = false; // Reset latch so pattern can evaluate
-                Serial.printf("📍 Reader %d [%s]: Card PLACED! UID: ", i + 1, readerNames[i]);
+                Serial.printf("📍 Slot %d [%s]: Coin INSERTED! UID: ", i + 1, readerNames[i]);
                 printUID(detectedUID[i], detectedUIDSize[i]);
             }
         } else {
@@ -499,25 +479,25 @@ void checkAllCards() {
                     detectedUIDSize[i] = 0;
                     memset(detectedUID[i], 0, sizeof(detectedUID[i]));
                     cardStateChanged = true;
-                    patternEvaluated = false; // Reset latch when card is removed
-                    Serial.printf("💨 Reader %d [%s]: Card REMOVED\n", i + 1, readerNames[i]);
+                    patternEvaluated = false; // Reset latch when coin is removed
+                    Serial.printf("💨 Slot %d [%s]: Coin REMOVED\n", i + 1, readerNames[i]);
                 }
             }
         }
-        delayMicroseconds(500); // Minimal SPI bus settling time between reader switches (was 5ms)
+        delayMicroseconds(500); // SPI bus settling time
     }
 
-    int totalDetected = getCardsPresentCount();
+    int totalDetected = getCoinsPresentCount();
 
-    // If cards were lifted or rearranged, ensure latch is cleared
+    // If coins were removed or rearranged, reset evaluation latch
     if (totalDetected < 4) {
         if (patternEvaluated) {
             patternEvaluated = false;
-            Serial.printf("ℹ️ Cards removed (%d/4 present). Ready for next evaluation.\n", totalDetected);
+            Serial.printf("ℹ️ Coins removed (%d/4 present). Ready for next evaluation.\n", totalDetected);
         }
     }
 
-    // Update LCD if state changed and we are in active play (auto-start on first placement if in READY)
+    // Update LCD if state changed and we are in active play (auto-start on first coin if in READY)
     if (cardStateChanged && (currentState == READY || currentState == STARTED)) {
         if (currentState == READY && totalDetected > 0) {
             currentState = STARTED;
@@ -527,8 +507,7 @@ void checkAllCards() {
         showPuzzleStatus();
     }
 
-    // CRITICAL REQUIREMENT:
-    // Check pattern ONLY when ALL 4 RFIDs have detected a card!
+    // OPTION B: Evaluate pattern ONLY when ALL 4 coins are placed!
     if (totalDetected == 4 && (currentState == READY || currentState == STARTED)) {
         if (!patternEvaluated) {
             evaluatePattern();
@@ -541,7 +520,7 @@ void evaluatePattern() {
 
     Serial.println();
     Serial.println("==================================================");
-    Serial.println("🔍 ALL 4 CARDS DETECTED! EVALUATING PATTERN...");
+    Serial.println("🔍 ALL 4 COINS INSERTED! EVALUATING POSITIONS...");
     Serial.println("==================================================");
 
     bool patternMatches = true;
@@ -556,7 +535,7 @@ void evaluatePattern() {
         if (uidMatches(detectedUID[i], detectedUIDSize[i], expectedUIDs[i], EXPECTED_UID_SIZE)) {
             Serial.println("  ✅ [MATCH]");
         } else {
-            Serial.println("  ❌ [WRONG CARD]");
+            Serial.println("  ❌ [WRONG COIN / POSITION]");
             patternMatches = false;
         }
     }
@@ -573,9 +552,9 @@ void handleSuccess() {
     puzzleSolved = true;
     currentState = COMPLETED;
 
-    Serial.println("🎉🎉🎉 ACCESS GRANTED! ALL 4 DOLLS IN CORRECT PATTERN! 🎉🎉🎉");
+    Serial.println("🎉🎉🎉 ACCESS GRANTED! ALL 4 COINS IN PROPER ORDER! 🎉🎉🎉");
 
-    unlockDoor(); // Actuate relay & move servo to 90° (anticlockwise)
+    unlockAllActuators(); // Actuate relay & move all servos to 90°
 
     // Publish COMPLETED -> Control Server plays victory audio
     publishState(COMPLETED);
@@ -585,31 +564,30 @@ void handleSuccess() {
 
     lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.print("PUZZLE SOLVED!");
+    lcd.print("PUZZLE SOLVED!  ");
     lcd.setCursor(0, 1);
-    lcd.print("DOOR UNLOCKED");
+    lcd.print("COINS ACCEPTED  ");
 }
 
 void handleFailure() {
     currentState = FAILED;
 
-    Serial.println("❌❌❌ WRONG PATTERN! 4 cards placed, but sequence is incorrect. ❌❌❌");
+    Serial.println("❌❌❌ WRONG ORDER! 4 coins placed, but positions are incorrect. ❌❌❌");
 
-    // Publish FAILED -> Control Server plays audio/<game_id>/failed.mp3 or failed.ogg
+    // Publish FAILED -> Control Server plays audio/game3/failed.ogg
     publishState(FAILED);
     publishEvent("FAILED");
 
     triggerLocalBuzzer(false);
-    turnOnFailLight(); // Turn ON Red Lights via AC Relay!
 
     lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.print("WRONG PATTERN!");
+    lcd.print("WRONG ORDER!    ");
     lcd.setCursor(0, 1);
-    lcd.print("TRY AGAIN...");
+    lcd.print("TRY AGAIN...    ");
 
-    // Non-blocking timer to return to STARTED state & turn off red lights
-    stateTransitionTime = millis() + FAIL_RED_LIGHT_DURATION_MS;
+    // Non-blocking timer to return to STARTED state after 2 seconds
+    stateTransitionTime = millis() + 2000;
 }
 
 // =================================================================================
@@ -621,7 +599,7 @@ void updateLcdDisplay() {
     switch (currentState) {
         case READY:
             lcd.setCursor(0, 0);
-            lcd.print("DOLLS PUZZLE    ");
+            lcd.print("COINS PUZZLE    ");
             lcd.setCursor(0, 1);
             lcd.print("READY TO PLAY   ");
             break;
@@ -632,7 +610,7 @@ void updateLcdDisplay() {
 
         case FAILED:
             lcd.setCursor(0, 0);
-            lcd.print("WRONG PATTERN!  ");
+            lcd.print("WRONG ORDER!    ");
             lcd.setCursor(0, 1);
             lcd.print("TRY AGAIN...    ");
             break;
@@ -641,7 +619,7 @@ void updateLcdDisplay() {
             lcd.setCursor(0, 0);
             lcd.print("PUZZLE SOLVED!  ");
             lcd.setCursor(0, 1);
-            lcd.print("DOOR UNLOCKED   ");
+            lcd.print("COINS ACCEPTED  ");
             break;
 
         case STOPPED:
@@ -654,7 +632,7 @@ void updateLcdDisplay() {
 }
 
 void showPuzzleStatus() {
-    // Line 0: "1:O 2:. 3:O 4:." -> 15 chars (O = Card Present, . = Empty Slot)
+    // Line 0: "1:O 2:. 3:O 4:." -> 15 chars (O = Coin Present, . = Empty Slot)
     lcd.setCursor(0, 0);
     char line0[17];
     snprintf(line0, sizeof(line0), "1:%c 2:%c 3:%c 4:%c  ",
@@ -666,12 +644,12 @@ void showPuzzleStatus() {
 
     // Line 1: Real-time placement count
     lcd.setCursor(0, 1);
-    int count = getCardsPresentCount();
+    int count = getCoinsPresentCount();
     if (count == 4) {
-        lcd.print("CHECKING PATTERN");
+        lcd.print("CHECKING ORDER..");
     } else {
         char line1[17];
-        snprintf(line1, sizeof(line1), "Placed: %d/4 Dolls", count);
+        snprintf(line1, sizeof(line1), "Placed: %d/4 Coins", count);
         lcd.print(line1);
     }
 }
@@ -710,7 +688,6 @@ void postEvent(const char* eventName) {
     }
 }
 
-// Transparent aliases for existing callers throughout the codebase
 void publishState(GameState state) {
     postState(state);
 }
@@ -730,11 +707,11 @@ void handleCommand(String cmd) {
         patternEvaluated = false;
         stateTransitionTime = 0;
         currentState = STARTED;
-        lockDoor();
+        lockAllActuators();
         postState(STARTED);
         postEvent("STARTED");
 
-        // Flush all cached cards and do a clean fresh scan of current physical reality
+        // Flush all cached cards and do a clean fresh scan
         for (byte i = 0; i < NUM_READERS; i++) {
             consecutiveMisses[i] = 0;
             detectedUIDSize[i] = 0;
@@ -742,8 +719,8 @@ void handleCommand(String cmd) {
             cardPresent[i] = scanReader(i);
         }
 
-        int total = getCardsPresentCount();
-        Serial.printf("🔄 [START/RESTART] State reset. Present physical dolls: %d/4\n", total);
+        int total = getCoinsPresentCount();
+        Serial.printf("🔄 [START/RESTART] State reset. Present physical coins: %d/4\n", total);
         if (total < 4) {
             patternEvaluated = false;
         } else {
@@ -754,7 +731,7 @@ void handleCommand(String cmd) {
     else if (cmd.equalsIgnoreCase("STOP")) {
         currentState = STOPPED;
         stateTransitionTime = 0;
-        lockDoor();
+        lockAllActuators();
         postState(STOPPED);
         postEvent("STOPPED");
         updateLcdDisplay();
@@ -765,7 +742,7 @@ void handleCommand(String cmd) {
         stateTransitionTime = 0;
         currentState = READY;
         attemptNumber = 0;
-        lockDoor();
+        lockAllActuators();
         postState(READY);
         postEvent("RESET");
 
@@ -793,27 +770,35 @@ void setup() {
     delay(500);
 
     Serial.println("\n==================================================");
-    Serial.println("   ESCAPE ROOM: 4-RFID DOLLS PUZZLE (Dual-Core)   ");
+    Serial.println("   ESCAPE ROOM: 4-RFID COINS PUZZLE (Dual-Core)   ");
     Serial.println("==================================================");
 
-    // 1. Initialize Relays, Servo & Reset Button
+    // 1. Initialize Relay & Servos
     pinMode(RELAY_PIN, OUTPUT);
-    if (FAIL_RELAY_PIN >= 0) {
-        pinMode(FAIL_RELAY_PIN, OUTPUT);
-        turnOffFailLight();
+
+    // Initialize Servo Motors (ESP32 PWM timers)
+    ESP32PWM::allocateTimer(0);
+    ESP32PWM::allocateTimer(1);
+    ESP32PWM::allocateTimer(2);
+    ESP32PWM::allocateTimer(3);
+
+    if (SERVO1_PIN >= 0) {
+        servo1.setPeriodHertz(50);
+        servo1.attach(SERVO1_PIN, 500, 2400);
+        Serial.printf("⚙️ Servo 1 attached on GPIO %d\n", SERVO1_PIN);
+    }
+    if (SERVO2_PIN >= 0) {
+        servo2.setPeriodHertz(50);
+        servo2.attach(SERVO2_PIN, 500, 2400);
+        Serial.printf("⚙️ Servo 2 attached on GPIO %d\n", SERVO2_PIN);
+    }
+    if (SERVO3_PIN >= 0) {
+        servo3.setPeriodHertz(50);
+        servo3.attach(SERVO3_PIN, 500, 2400);
+        Serial.printf("⚙️ Servo 3 attached on GPIO %d\n", SERVO3_PIN);
     }
 
-    // Initialize Servo Motor (ESP32 PWM)
-    if (SERVO_PIN >= 0) {
-        ESP32PWM::allocateTimer(0);
-        ESP32PWM::allocateTimer(1);
-        ESP32PWM::allocateTimer(2);
-        ESP32PWM::allocateTimer(3);
-        puzzleServo.setPeriodHertz(50);             // Standard 50Hz servo
-        puzzleServo.attach(SERVO_PIN, 500, 2400);   // Standard 500us-2400us pulses for 0-180°
-    }
-
-    lockDoor(); // Initializes Relay to locked & Servo to 0°
+    lockAllActuators(); // Relays locked & Servos to 0°
 
     pinMode(RESET_BTN_PIN, INPUT_PULLUP);
 
@@ -824,12 +809,12 @@ void setup() {
 
     // 2. Initialize I2C Bus & LCD Display with bus timeout protection
     Wire.begin(LCD_SDA, LCD_SCL);
-    Wire.setTimeOut(100); // 100ms timeout prevents I2C bus hanging on inductive spike noise
+    Wire.setTimeOut(100); // 100ms timeout prevents I2C bus hang
     lcd.init();
     lcd.backlight();
     lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.print("DOLLS PUZZLE");
+    lcd.print("COINS PUZZLE");
     lcd.setCursor(0, 1);
     lcd.print("BOOTING...");
 
@@ -843,14 +828,14 @@ void setup() {
     deselectAllReaders();
 
     // 5. Initialize each MFRC522 Reader individually
-    Serial.println("\nInitializing 4 RFID Readers...");
+    Serial.println("\nInitializing 4 RFID Coin Readers...");
     for (byte i = 0; i < NUM_READERS; i++) {
         deselectAllReaders();
         digitalWrite(SS_PINS[i], LOW);
         delay(10);
         readers[i].PCD_Init();
         delay(10);
-        readers[i].PCD_SetAntennaGain(MFRC522::RxGain_max); // Maximize antenna gain for prop housing
+        readers[i].PCD_SetAntennaGain(MFRC522::RxGain_max); // Maximize antenna gain
         delay(5);
         digitalWrite(SS_PINS[i], HIGH);
         delay(5);
@@ -886,7 +871,7 @@ void setup() {
         currentState = STARTED;
         postState(STARTED);
         postEvent("STARTED");
-        Serial.println("⚡ Puzzle auto-started! Place all 4 dolls to evaluate.");
+        Serial.println("⚡ Puzzle auto-started! Place all 4 coins into their slots.");
     } else {
         currentState = READY;
         postState(READY);
@@ -903,7 +888,7 @@ void setup() {
 void loop() {
     unsigned long now = millis();
 
-    // 1. Process Incoming Commands from Core 0 (Zero-latency queue drain)
+    // 1. Process Incoming Commands from Core 0
     if (cmdQueue != NULL) {
         CommandMsg incoming;
         while (xQueueReceive(cmdQueue, &incoming, 0) == pdTRUE) {
@@ -911,7 +896,7 @@ void loop() {
         }
     }
 
-    // 2. Physical Manual Reset Button Check (Glitch-Free Debounce)
+    // 2. Physical Manual Reset Button Check
     bool currentBtnState = digitalRead(RESET_BTN_PIN);
     if (currentBtnState == LOW && lastButtonState == HIGH) {
         if (now - lastButtonPressTime > 250) {
@@ -922,14 +907,9 @@ void loop() {
     }
     lastButtonState = currentBtnState;
 
-    // 3. Non-Blocking Red Light & State Transitions (for FAILED cooldown)
-    if (failLightTurnOffTime > 0 && now >= failLightTurnOffTime) {
-        turnOffFailLight();
-    }
-
+    // 3. Non-Blocking State Transitions (for FAILED cooldown)
     if (stateTransitionTime > 0 && now >= stateTransitionTime) {
         stateTransitionTime = 0;
-        turnOffFailLight();
         if (currentState == FAILED) {
             currentState = STARTED;
             postState(STARTED);
@@ -942,11 +922,11 @@ void loop() {
         checkAllCards();
     }
 
-    // 5. Non-blocking Auto-Relock Timer Check (for Solenoid locks)
+    // 5. Non-blocking Auto-Relock Timer Check
     if (AUTO_RELOCK_DELAY_MS > 0 && unlockedAt > 0) {
         if (now - unlockedAt >= AUTO_RELOCK_DELAY_MS) {
             Serial.println("⏱️ [RELAY] Auto-relock timer elapsed. Securing door...");
-            lockDoor();
+            lockAllActuators();
         }
     }
 }
@@ -978,10 +958,10 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 bool discoverMQTTServer() {
     Serial.println("\n🔍 [mDNS Core 0] Discovering Escape Room Control Server...");
 
-    if (!MDNS.begin("ESP32-RFIDDolls")) {
+    if (!MDNS.begin("ESP32-RFIDCoins")) {
         Serial.println("⚠️ [mDNS Core 0] Responder init failed, querying...");
     } else {
-        Serial.println("📡 [mDNS Core 0] Responder active ('ESP32-RFIDDolls.local')");
+        Serial.println("📡 [mDNS Core 0] Responder active ('ESP32-RFIDCoins.local')");
     }
 
     // 1. Try DNS-SD Service Discovery
@@ -1070,7 +1050,6 @@ void maintainWiFi() {
 void maintainMQTT() {
     if (WiFi.status() != WL_CONNECTED) return;
 
-    // If server has not yet been discovered via mDNS, retry discovery periodically
     if (!serverDiscovered) {
         unsigned long now = millis();
         if (now - lastMdnsRetry > 10000) {
@@ -1082,7 +1061,7 @@ void maintainMQTT() {
     if (mqtt.connected()) return;
 
     unsigned long now = millis();
-    if (now - lastMqttRetry > 5000) { // Retries indefinitely every 5s on Core 0!
+    if (now - lastMqttRetry > 5000) {
         lastMqttRetry = now;
         Serial.printf("🔌 [Core 0] Connecting to MQTT Broker at %s:%d...\n", 
                       activeMqttIP.toString().c_str(), activeMqttPort);
@@ -1094,76 +1073,54 @@ void maintainMQTT() {
             mqtt.publish(topicStatus, "online", true);
             mqtt.subscribe(topicCmd);
 
-            // Publish current live state immediately upon reconnect
-            const char* stateStr = "READY";
-            switch (currentState) {
-                case READY:     stateStr = "READY";     break;
-                case STARTED:   stateStr = "STARTED";   break;
-                case FAILED:    stateStr = "FAILED";    break;
-                case COMPLETED: stateStr = "COMPLETED"; break;
-                case STOPPED:   stateStr = "STOPPED";   break;
-            }
-            char buf[128];
-            snprintf(buf, sizeof(buf), "{\"state\":\"%s\",\"attempt\":%d}", stateStr, attemptNumber);
-            mqtt.publish(topicState, buf, true);
+            postState(currentState);
+            postEvent("ONLINE");
         } else {
-            Serial.printf("⚠️ [Core 0] MQTT Failed (rc=%d). Retrying in 5 seconds in background...\n", mqtt.state());
+            Serial.printf("❌ [Core 0] MQTT Connect failed (rc=%d). Retrying in 5s...\n", mqtt.state());
         }
     }
 }
 
 void networkTask(void* pvParameters) {
-    Serial.printf("🌐 [Core 0] Background Network Task running on Core %d\n", xPortGetCoreID());
-
-    mqtt.setBufferSize(512);
-    mqtt.setKeepAlive(15);
-    mqtt.setSocketTimeout(1);
+    setupWiFi();
     mqtt.setCallback(mqttCallback);
 
-    setupWiFi();
+    unsigned long lastHeartbeatTime = 0;
 
-    unsigned long lastHb = 0;
-
-    while (true) {
+    for (;;) {
         maintainWiFi();
         maintainMQTT();
 
         if (mqtt.connected()) {
             mqtt.loop();
 
-            // Drain all outgoing telemetry from Core 1
+            // Process telemetry queue from Core 1
             if (telemetryQueue != NULL) {
                 TelemetryMsg msg;
                 while (xQueueReceive(telemetryQueue, &msg, 0) == pdTRUE) {
+                    char payload[128];
                     if (msg.kind == 'S') {
-                        char buf[128];
-                        snprintf(buf, sizeof(buf), "{\"state\":\"%s\",\"attempt\":%d}", msg.text, msg.attempt);
-                        mqtt.publish(topicState, buf, true);
+                        snprintf(payload, sizeof(payload), "{\"state\":\"%s\",\"attempt\":%d}", msg.text, msg.attempt);
+                        mqtt.publish(topicState, payload, false);
+                        Serial.printf("📡 [MQTT TX Core 0] State: %s\n", payload);
                     } else if (msg.kind == 'E') {
-                        char buf[128];
-                        snprintf(buf, sizeof(buf), "{\"event\":\"%s\",\"attempt\":%d}", msg.text, msg.attempt);
-                        mqtt.publish(topicEvent, buf, false);
+                        snprintf(payload, sizeof(payload), "{\"event\":\"%s\",\"attempt\":%d}", msg.text, msg.attempt);
+                        mqtt.publish(topicEvent, payload, false);
+                        Serial.printf("📡 [MQTT TX Core 0] Event: %s\n", payload);
                     }
                 }
             }
 
-            // Periodic Heartbeat every 3 seconds
+            // Periodic 3-second heartbeat to control dashboard
             unsigned long now = millis();
-            if (now - lastHb > HEARTBEAT_INTERVAL) {
-                lastHb = now;
-                char buf[128];
-                snprintf(buf, sizeof(buf), "{\"event\":\"HEARTBEAT\",\"attempt\":%d}", attemptNumber);
-                mqtt.publish(topicEvent, buf, false);
-            }
-        } else {
-            // Offline: drain queue so stale messages don't accumulate while disconnected
-            if (telemetryQueue != NULL) {
-                TelemetryMsg discard;
-                while (xQueueReceive(telemetryQueue, &discard, 0) == pdTRUE);
+            if (now - lastHeartbeatTime >= HEARTBEAT_INTERVAL) {
+                lastHeartbeatTime = now;
+                char hbPayload[64];
+                snprintf(hbPayload, sizeof(hbPayload), "{\"event\":\"HEARTBEAT\",\"attempt\":%d}", attemptNumber);
+                mqtt.publish(topicEvent, hbPayload, false);
             }
         }
 
-        // Crucial: yield 15ms to FreeRTOS scheduler on Core 0
-        vTaskDelay(pdMS_TO_TICKS(15));
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }

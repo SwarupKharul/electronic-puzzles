@@ -13,7 +13,8 @@ If you just moved this folder to a new Windows machine:
    - **Node.js Check**: If Node.js is not yet installed, `start.bat` will automatically attempt to install it via Windows Package Manager (`winget`) or open the official download page.
    - **Dependencies**: Automatically runs `npm install` on first launch.
    - **Frontend**: Automatically builds the React dashboard if needed.
-   - **Firewall**: Automatically adds Windows Firewall rules for Ports `3000`, `1883`, and `1884`.
+   - **Firewall**: Automatically adds Windows Firewall rules for Ports `3000`, `1883`, `1884`, and `9001`.
+   - **Mosquitto Broker**: Automatically detects Eclipse Mosquitto, creates `mosquitto-data/` persistence directory, and launches it with the included [`mosquitto.conf`](file:///home/swarup/Downloads/escaperoommaster/claude/v2/mosquitto.conf).
    - **Browser**: Automatically opens `http://localhost:3000` in your default browser.
 2. *(Optional)* **Double-click [`create-desktop-shortcut.bat`](file:///home/swarup/Downloads/escaperoommaster/claude/v2/create-desktop-shortcut.bat)** to create a one-click desktop icon for daily operations.
 

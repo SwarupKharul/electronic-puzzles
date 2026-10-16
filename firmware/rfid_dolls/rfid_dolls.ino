@@ -466,12 +466,30 @@ bool scanReader(byte readerIdx) {
 // 7. PATTERN EVALUATION & CORE LOGIC
 // =================================================================================
 
+// Stabilization delay (ms) ensuring all 4 cards have physically settled
+const unsigned long STABILIZATION_DELAY_MS = 250;
+unsigned long cardsStableSince = 0;
+
 int getCardsPresentCount() {
     int count = 0;
     for (byte i = 0; i < NUM_READERS; i++) {
         if (cardPresent[i]) count++;
     }
     return count;
+}
+
+// Verifies that all 4 pedestals contain mutually unique physical tags (no duplicate UIDs)
+bool areAllCardsUnique() {
+    for (byte i = 0; i < NUM_READERS; i++) {
+        if (!cardPresent[i] || detectedUIDSize[i] == 0) return false;
+        for (byte j = i + 1; j < NUM_READERS; j++) {
+            if (detectedUIDSize[i] == detectedUIDSize[j] &&
+                memcmp(detectedUID[i], detectedUID[j], detectedUIDSize[i]) == 0) {
+                return false; // Same doll registered on two pedestals
+            }
+        }
+    }
+    return true;
 }
 
 void checkAllCards() {
@@ -483,6 +501,25 @@ void checkAllCards() {
 
         if (found) {
             consecutiveMisses[i] = 0;
+
+            // CROSS-READER DEDUPLICATION:
+            // A single physical doll cannot exist on two pedestals at once.
+            // If another pedestal still holds this exact UID, invalidate that old pedestal immediately!
+            for (byte j = 0; j < NUM_READERS; j++) {
+                if (j != i && cardPresent[j]) {
+                    if (detectedUIDSize[j] == detectedUIDSize[i] &&
+                        memcmp(detectedUID[j], detectedUID[i], detectedUIDSize[i]) == 0) {
+                        cardPresent[j] = false;
+                        detectedUIDSize[j] = 0;
+                        memset(detectedUID[j], 0, sizeof(detectedUID[j]));
+                        consecutiveMisses[j] = 0;
+                        cardStateChanged = true;
+                        patternEvaluated = false;
+                        Serial.printf("🔀 [DOLL MOVED] Doll lifted from Reader %d and placed on Reader %d\n", j + 1, i + 1);
+                    }
+                }
+            }
+
             if (!cardPresent[i]) {
                 cardPresent[i] = true;
                 cardStateChanged = true;
@@ -511,6 +548,7 @@ void checkAllCards() {
 
     // If cards were lifted or rearranged, ensure latch is cleared
     if (totalDetected < 4) {
+        cardsStableSince = 0;
         if (patternEvaluated) {
             patternEvaluated = false;
             Serial.printf("ℹ️ Cards removed (%d/4 present). Ready for next evaluation.\n", totalDetected);
@@ -528,13 +566,20 @@ void checkAllCards() {
     }
 
     // CRITICAL REQUIREMENT:
-    // Check pattern ONLY when ALL 4 RFIDs have detected a card!
-    if (totalDetected == 4 && (currentState == READY || currentState == STARTED)) {
-        if (!patternEvaluated) {
-            evaluatePattern();
+    // Check pattern ONLY when ALL 4 distinct physical cards have settled!
+    if (totalDetected == 4 && areAllCardsUnique() && (currentState == READY || currentState == STARTED)) {
+        if (cardsStableSince == 0) {
+            cardsStableSince = millis(); // Start settling timer
+        } else if (millis() - cardsStableSince >= STABILIZATION_DELAY_MS) {
+            if (!patternEvaluated) {
+                evaluatePattern();
+            }
         }
+    } else {
+        cardsStableSince = 0;
     }
 }
+
 
 void evaluatePattern() {
     patternEvaluated = true; // Latch: ensures audio feedback triggers ONLY ONCE per placement

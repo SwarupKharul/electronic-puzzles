@@ -2,13 +2,20 @@
  * =================================================================================
  * ESCAPE ROOM - 4 RFID COINS POSITIONAL PUZZLE (Dual-Core FreeRTOS Architecture)
  * =================================================================================
- * Features:
+ * Production-Ready Firmware (Simplified & Hardened):
+ *   - Removed Servo Motors (pure solid-state / 12V lock relay actuation).
+ *   - Removed I2C LCD Display (status & audio managed centrally via Laptop Server & Dashboard).
+ *   - Removed Piezo Buzzer (audio played via central Escape Room sound system).
+ *   - Relay relocated to GPIO 5 (Right-side header of ESP32) for direct, clean wiring
+ *     alongside the RFID reader pin cluster.
+ *
+ * Core Architecture:
  *   - Dual-Core Isolation:
- *       • Core 1 (APP_CPU): 100% dedicated to 4x MFRC522 RFID SPI scanning,
- *                           up to 3x servo motors, relay, buzzer, and 16x2 LCD.
- *                           Pure hardware determinism with ZERO network code or blocking.
- *       • Core 0 (PRO_CPU): Dedicated background network task. Retries Wi-Fi, mDNS,
- *                           and MQTT indefinitely every 5s with zero impact on card scanning.
+ *       • Core 1 (APP_CPU): 100% dedicated to 4x MFRC522 RFID SPI scanning and Relay
+ *                           actuation. Pure hardware determinism with ZERO network code,
+ *                           delays, or blocking.
+ *       • Core 0 (PRO_CPU): Dedicated background network task. Retries Wi-Fi, mDNS, and
+ *                           MQTT indefinitely every 5s with zero impact on card scanning.
  *   - Thread-Safe Inter-Core Queues (FreeRTOS xQueue):
  *       • cmdQueue: Transfers incoming GM commands (START, RESET, STOP, SOLVE) to Core 1.
  *       • telemetryQueue: Posts outgoing state/event changes from Core 1 to Core 0.
@@ -16,20 +23,21 @@
  *       • Players place 4 coins into 4 designated slots/receptacles in any time order.
  *       • Evaluation triggers ONLY when all 4 coins are placed (4/4 present).
  *       • Slot 1 must hold Coin 1, Slot 2 must hold Coin 2, Slot 3 must hold Coin 3, Slot 4 must hold Coin 4.
- *       • If correct: Unlocks relay, rotates servos to 90°, plays victory chime.
- *       • If incorrect: Triggers FAILED event, plays error buzz, allows players to rearrange coins.
- *   - Multi-Servo Actuation: Controls up to 3 servo motors (e.g. coin drawer, lock latch, compartment).
+ *       • If correct: Unlocks relay and triggers COMPLETED victory audio on central server.
+ *       • If incorrect: Triggers FAILED event, plays error sound on server, allows players to rearrange coins.
+ *   - Glitch-Free Relay Power-On:
+ *       • Relay pin initialized HIGH (de-energized) prior to setting pin mode to prevent
+ *         accidental unlocking or clicking on boot.
  *   - Dynamic card-swap detection (evaluates even if coins swapped without lifting).
  *   - Automated MFRC522 PCD register self-healing & antenna gain optimization.
  *   - Configurable Active-LOW / Active-HIGH relay trigger logic for Solenoid / Maglock.
- *   - I2C 16x2 LCD Display with I2C bus timeout protection against noise lockups.
  *   - PubSubClient expanded 512-byte buffer with Last Will and Testament (LWT).
  *
  * ---------------------------------------------------------------------------------
- * WIRING GUIDE:
+ * HARDWARE WIRING GUIDE:
  * ---------------------------------------------------------------------------------
- * 1. MFRC522 RFID READERS (Shared SPI Bus + Dedicated SS/CS Pins):
- *      [All 4 Readers]         [ESP32]
+ * 1. 4x MFRC522 RFID READERS (Shared SPI Bus + Dedicated SS/CS Pins):
+ *      [All 4 Readers]         [ESP32 Right Header]
  *      SCK              --->   GPIO 18
  *      MISO             --->   GPIO 19
  *      MOSI             --->   GPIO 23
@@ -49,27 +57,24 @@
  *      [Reader 4 (Coin Slot 4)]
  *      SDA / SS / CS    --->   GPIO 17 (SS4)
  *
- * 2. I2C 16x2 LCD DISPLAY:
- *      VCC              --->   VIN (5V) or 3.3V
- *      GND              --->   GND
- *      SDA              --->   GPIO 26
- *      SCL              --->   GPIO 27
+ * 2. 3-PIN RELAY MODULE (Solenoid / Maglock Lock):
+ *      [Relay Module]          [ESP32]
+ *      IN / SIG / S     --->   GPIO 5  (Right Header - Clean, direct connection)
+ *      VCC              --->   VIN (5V from USB / External 5V)
+ *      GND              --->   GND (Common Ground)
  *
- * 3. 3-PIN RELAY MODULE (Maglock / Solenoid Lock):
- *      VCC              --->   VIN (5V)
- *      GND              --->   GND
- *      IN / SIG / S     --->   GPIO 25 (RELAY_PIN)
+ *    High-Power Lock Side (Relay Screw Terminals: COM, NO, NC):
+ *      • 12V Solenoid Cabinet Lock (Fail-Secure - Locked when unpowered):
+ *          12V Power Supply (+) ---> Relay COM
+ *          Relay NO             ---> Solenoid Lock (+)
+ *          12V Power Supply (-) ---> Solenoid Lock (-)
+ *      • 12V Electromagnetic Lock / Maglock (Fail-Safe - Locked when powered):
+ *          12V Power Supply (+) ---> Relay COM
+ *          Relay NC             ---> Maglock (+)
+ *          12V Power Supply (-) ---> Maglock (-)
  *
- * 4. SERVO MOTORS (Up to 3 Servos for Locking / Drawers / Hatches):
- *      Servo 1 (Main Lock)   --->   GPIO 13 (SERVO1_PIN)
- *      Servo 2 (Drawer/Box)  --->   GPIO 33 (SERVO2_PIN, or -1 to disable)
- *      Servo 3 (Trapdoor)    --->   GPIO 12 (SERVO3_PIN, or -1 to disable)
- *      VCC (Red)             --->   External 5V (2A+ Power Supply recommended!)
- *      GND (Brown/Black)     --->   Common GND
- *
- * 5. PHYSICAL HARDWARE BUTTON & BUZZER:
- *      Reset Button     --->   GPIO 14 (Active LOW to GND, internal pullup)
- *      Piezo Buzzer     --->   GPIO 32 (Positive to Pin, Negative to GND, -1 to disable)
+ * 3. OPTIONAL HARDWARE RESET BUTTON:
+ *      Reset Button     --->   GPIO 14 (Active LOW to GND, internal pull-up)
  * =================================================================================
  */
 
@@ -80,10 +85,7 @@
 #include <PubSubClient.h>
 #include <SPI.h>
 #include <MFRC522.h>
-#include <Wire.h>
-#include <LiquidCrystal_I2C.h>
 #include <ESPmDNS.h>
-#include <ESP32Servo.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -92,7 +94,7 @@
 // 1. HARDWARE PIN DEFINITIONS & CONFIGURATION
 // =================================================================================
 
-// RFID Shared SPI Bus
+// RFID Shared SPI Bus (Right Header of ESP32)
 #define RFID_SCK   18
 #define RFID_MISO  19
 #define RFID_MOSI  23
@@ -104,27 +106,15 @@
 #define SS3 16  // Reader 3 - Coin 3
 #define SS4 17  // Reader 4 - Coin 4
 
-// I2C LCD Pins (16x2)
-#define LCD_SDA 26
-#define LCD_SCL 27
-#define LCD_I2C_ADDR 0x27
+// Relay & Button Pins
+// RELAY_PIN relocated to GPIO 5 on the right header (opposite side from GPIO 25)
+#define RELAY_PIN      5  // Solenoid / Maglock Relay Signal (Right Header)
+#define RESET_BTN_PIN  14 // Optional manual reset button (active LOW to GND)
 
-// Relay & Actuator Pins
-#define RELAY_PIN      25 // Solenoid / Maglock Relay
-#define SERVO1_PIN     13 // Primary Servo Motor Pin (-1 to disable)
-#define SERVO2_PIN     33 // Secondary Servo Motor Pin (-1 to disable)
-#define SERVO3_PIN     12 // Tertiary Servo Motor Pin (-1 to disable)
-#define RESET_BTN_PIN  14 // Optional manual reset button (active LOW)
-#define BUZZER_PIN     32 // Optional local piezo buzzer (-1 to disable)
-
-// Servo Motor Positions (Degrees)
-const int SERVO_LOCKED_POS   = 0;   // 0° when reset / standby / locked
-const int SERVO_UNLOCKED_POS = 90;  // 90° when puzzle is solved / unlocked
-
-// Relay Trigger Logic (Most 3-pin relay modules are ACTIVE-LOW)
+// Relay Trigger Logic (Standard 3-pin relay modules are ACTIVE-LOW)
 const bool RELAY_ACTIVE_LOW = true;
 
-// Auto-relock pulse duration in milliseconds (0 = stays unlocked until RESET)
+// Auto-relock pulse duration in milliseconds (0 = stays unlocked until RESET / new game)
 const unsigned long AUTO_RELOCK_DELAY_MS = 0;
 unsigned long unlockedAt = 0;
 
@@ -160,19 +150,19 @@ const char* ROOT_TOPIC    = "escaperoom";     // Matches "rootTopic" in games.js
 // RFID coin stickers (printed to Serial monitor when you first tap them).
 const byte NUM_READERS = 4;
 const byte SS_PINS[NUM_READERS] = { SS1, SS2, SS3, SS4 };
-const byte EXPECTED_UID_SIZE = 7; // Supports 4 or 7 bytes (Mifare Classic or NTAG213)
+const byte EXPECTED_UID_SIZE = 4; // 4-byte UIDs (Mifare Classic 1K)
 
-// Expected UID for Slot 1 (Coin 1)
-byte expectedUID1[EXPECTED_UID_SIZE] = { 0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66 };
+// Expected UID for Slot 1 (Coin 1) 6A F0 25 07
+byte expectedUID1[EXPECTED_UID_SIZE] = { 0x6A, 0xF0, 0x25, 0x07 };
 
-// Expected UID for Slot 2 (Coin 2)
-byte expectedUID2[EXPECTED_UID_SIZE] = { 0x04, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77 };
+// Expected UID for Slot 2 (Coin 2) 66 F2 2A 07
+byte expectedUID2[EXPECTED_UID_SIZE] = { 0x66, 0xF2, 0x2A, 0x07 };
 
-// Expected UID for Slot 3 (Coin 3)
-byte expectedUID3[EXPECTED_UID_SIZE] = { 0x04, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88 };
+// Expected UID for Slot 3 (Coin 3) 5E 87 25 07
+byte expectedUID3[EXPECTED_UID_SIZE] = { 0x5E, 0x87, 0x25, 0x07 };
 
-// Expected UID for Slot 4 (Coin 4)
-byte expectedUID4[EXPECTED_UID_SIZE] = { 0x04, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99 };
+// Expected UID for Slot 4 (Coin 4) CE 0B 24 07
+byte expectedUID4[EXPECTED_UID_SIZE] = { 0xCE, 0x0B, 0x24, 0x07 };
 
 const byte* expectedUIDs[NUM_READERS] = {
     expectedUID1,
@@ -205,11 +195,6 @@ struct TelemetryMsg {
 QueueHandle_t cmdQueue = NULL;
 QueueHandle_t telemetryQueue = NULL;
 TaskHandle_t networkTaskHandle = NULL;
-
-LiquidCrystal_I2C lcd(LCD_I2C_ADDR, 16, 2);
-Servo servo1;
-Servo servo2;
-Servo servo3;
 
 MFRC522 readers[NUM_READERS] = {
     MFRC522(SS1, RFID_RST),
@@ -274,55 +259,37 @@ void checkAllCards();
 void evaluatePattern();
 void handleSuccess();
 void handleFailure();
+void lockDoor();
+void unlockDoor();
 void lockAllActuators();
 void unlockAllActuators();
-void moveServos(int angle);
-void triggerLocalBuzzer(bool success);
-void updateLcdDisplay();
-void showPuzzleStatus();
 bool uidMatches(const byte* actualUID, byte actualSize, const byte* expectedUID, byte expectedSize = EXPECTED_UID_SIZE);
 void printUID(const byte* uid, byte size);
 void printUIDInline(const byte* uid, byte size);
 void recoverReader(byte readerIdx);
 
 // =================================================================================
-// 5. RELAY & MULTI-SERVO ACTUATOR CONTROL
+// 5. RELAY ACTUATOR CONTROL (Glitch-Free & Safe)
 // =================================================================================
 
-void moveServos(int angle) {
-    if (SERVO1_PIN >= 0) {
-        servo1.write(angle);
-    }
-    if (SERVO2_PIN >= 0) {
-        servo2.write(angle);
-    }
-    if (SERVO3_PIN >= 0) {
-        servo3.write(angle);
-    }
-    Serial.printf("⚙️ [SERVOS] Position set to %d° across active servos\n", angle);
+void lockDoor() {
+    digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? HIGH : LOW);
+    unlockedAt = 0;
+    Serial.println("🔒 [RELAY] Door Locked (Relay DE-ENERGIZED)");
+}
+
+void unlockDoor() {
+    digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? LOW : HIGH);
+    unlockedAt = millis();
+    Serial.println("🔓 [RELAY] Door Unlocked (Relay ENERGIZED)");
 }
 
 void lockAllActuators() {
-    digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? HIGH : LOW);
-    moveServos(SERVO_LOCKED_POS); // Reset servos back to 0°
-    unlockedAt = 0;
-    Serial.println("🔒 [ACTUATOR] Locked (Relay DE-ENERGIZED, Servos at 0°)");
+    lockDoor();
 }
 
 void unlockAllActuators() {
-    digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? LOW : HIGH);
-    moveServos(SERVO_UNLOCKED_POS); // Move servos to 90°
-    unlockedAt = millis();
-    Serial.println("🔓 [ACTUATOR] Unlocked (Relay ENERGIZED, Servos at 90°)");
-}
-
-void triggerLocalBuzzer(bool success) {
-    if (BUZZER_PIN < 0) return;
-    if (success) {
-        tone(BUZZER_PIN, 1500, 350); // Celebratory success chirp
-    } else {
-        tone(BUZZER_PIN, 250, 450);  // Low failure buzz
-    }
+    unlockDoor();
 }
 
 // =================================================================================
@@ -404,7 +371,7 @@ bool scanReader(byte readerIdx) {
         if (readers[readerIdx].PICC_ReadCardSerial()) {
             cardFound = true;
             
-            // Check if UID changed while resting on reader (card swapped)
+            // Check if UID changed while resting on reader (coin swapped in slot)
             bool uidChanged = (detectedUIDSize[readerIdx] != readers[readerIdx].uid.size);
             if (!uidChanged) {
                 for (byte b = 0; b < readers[readerIdx].uid.size; b++) {
@@ -421,7 +388,7 @@ bool scanReader(byte readerIdx) {
             }
 
             if (uidChanged && cardPresent[readerIdx]) {
-                // Coin was swapped without leaving slot empty
+                // Coin was swapped directly in place
                 patternEvaluated = false;
                 Serial.printf("🔄 Slot %d [%s]: Coin SWAPPED! New UID: ", readerIdx + 1, readerNames[readerIdx]);
                 printUID(detectedUID[readerIdx], detectedUIDSize[readerIdx]);
@@ -446,12 +413,30 @@ bool scanReader(byte readerIdx) {
 // 7. POSITIONAL PATTERN EVALUATION (Option B: Checked ONLY when 4/4 coins placed)
 // =================================================================================
 
+// Stabilization delay (ms) ensuring all 4 coins have physically settled
+const unsigned long STABILIZATION_DELAY_MS = 250;
+unsigned long cardsStableSince = 0;
+
 int getCoinsPresentCount() {
     int count = 0;
     for (byte i = 0; i < NUM_READERS; i++) {
         if (cardPresent[i]) count++;
     }
     return count;
+}
+
+// Verifies that all 4 slots contain mutually unique physical tags (no duplicate UIDs)
+bool areAllCardsUnique() {
+    for (byte i = 0; i < NUM_READERS; i++) {
+        if (!cardPresent[i] || detectedUIDSize[i] == 0) return false;
+        for (byte j = i + 1; j < NUM_READERS; j++) {
+            if (detectedUIDSize[i] == detectedUIDSize[j] &&
+                memcmp(detectedUID[i], detectedUID[j], detectedUIDSize[i]) == 0) {
+                return false; // Same coin registered in two slots
+            }
+        }
+    }
+    return true;
 }
 
 void checkAllCards() {
@@ -463,6 +448,25 @@ void checkAllCards() {
 
         if (found) {
             consecutiveMisses[i] = 0;
+
+            // CROSS-READER DEDUPLICATION:
+            // A single physical coin cannot exist in two slots at once.
+            // If another slot still holds this exact UID, invalidate that old slot immediately!
+            for (byte j = 0; j < NUM_READERS; j++) {
+                if (j != i && cardPresent[j]) {
+                    if (detectedUIDSize[j] == detectedUIDSize[i] &&
+                        memcmp(detectedUID[j], detectedUID[i], detectedUIDSize[i]) == 0) {
+                        cardPresent[j] = false;
+                        detectedUIDSize[j] = 0;
+                        memset(detectedUID[j], 0, sizeof(detectedUID[j]));
+                        consecutiveMisses[j] = 0;
+                        cardStateChanged = true;
+                        patternEvaluated = false;
+                        Serial.printf("🔀 [COIN MOVED] Coin lifted from Slot %d and placed in Slot %d\n", j + 1, i + 1);
+                    }
+                }
+            }
+
             if (!cardPresent[i]) {
                 cardPresent[i] = true;
                 cardStateChanged = true;
@@ -489,34 +493,41 @@ void checkAllCards() {
 
     int totalDetected = getCoinsPresentCount();
 
-    // If coins were removed or rearranged, reset evaluation latch
+    // If fewer than 4 coins are present, reset evaluation latch & stabilization timer
     if (totalDetected < 4) {
+        cardsStableSince = 0;
         if (patternEvaluated) {
             patternEvaluated = false;
-            Serial.printf("ℹ️ Coins removed (%d/4 present). Ready for next evaluation.\n", totalDetected);
+            Serial.printf("ℹ️ Coins removed (%d/4 present). Ready for next placement attempt.\n", totalDetected);
         }
     }
 
-    // Update LCD if state changed and we are in active play (auto-start on first coin if in READY)
+    // Auto-transition to STARTED on first coin placed if in READY
     if (cardStateChanged && (currentState == READY || currentState == STARTED)) {
         if (currentState == READY && totalDetected > 0) {
             currentState = STARTED;
             publishState(STARTED);
             publishEvent("STARTED");
         }
-        showPuzzleStatus();
     }
 
-    // OPTION B: Evaluate pattern ONLY when ALL 4 coins are placed!
-    if (totalDetected == 4 && (currentState == READY || currentState == STARTED)) {
-        if (!patternEvaluated) {
-            evaluatePattern();
+    // OPTION B: Evaluate pattern ONLY when ALL 4 distinct physical coins are settled!
+    if (totalDetected == 4 && areAllCardsUnique() && (currentState == READY || currentState == STARTED)) {
+        if (cardsStableSince == 0) {
+            cardsStableSince = millis(); // Start settling timer
+        } else if (millis() - cardsStableSince >= STABILIZATION_DELAY_MS) {
+            if (!patternEvaluated) {
+                evaluatePattern();
+            }
         }
+    } else {
+        cardsStableSince = 0;
     }
 }
 
+
 void evaluatePattern() {
-    patternEvaluated = true; // Latch: ensures audio feedback triggers ONLY ONCE per placement
+    patternEvaluated = true; // Latch: ensures evaluation triggers ONLY ONCE per placement
 
     Serial.println();
     Serial.println("==================================================");
@@ -554,19 +565,11 @@ void handleSuccess() {
 
     Serial.println("🎉🎉🎉 ACCESS GRANTED! ALL 4 COINS IN PROPER ORDER! 🎉🎉🎉");
 
-    unlockAllActuators(); // Actuate relay & move all servos to 90°
+    unlockDoor(); // Energize relay to unlock door / drawer
 
     // Publish COMPLETED -> Control Server plays victory audio
     publishState(COMPLETED);
     publishEvent("COMPLETED");
-
-    triggerLocalBuzzer(true);
-
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("PUZZLE SOLVED!  ");
-    lcd.setCursor(0, 1);
-    lcd.print("COINS ACCEPTED  ");
 }
 
 void handleFailure() {
@@ -578,84 +581,12 @@ void handleFailure() {
     publishState(FAILED);
     publishEvent("FAILED");
 
-    triggerLocalBuzzer(false);
-
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("WRONG ORDER!    ");
-    lcd.setCursor(0, 1);
-    lcd.print("TRY AGAIN...    ");
-
-    // Non-blocking timer to return to STARTED state after 2 seconds
+    // Non-blocking timer to return to STARTED state after 2 seconds cooldown
     stateTransitionTime = millis() + 2000;
 }
 
 // =================================================================================
-// 8. LCD DISPLAY HANDLERS
-// =================================================================================
-
-void updateLcdDisplay() {
-    lcd.clear();
-    switch (currentState) {
-        case READY:
-            lcd.setCursor(0, 0);
-            lcd.print("COINS PUZZLE    ");
-            lcd.setCursor(0, 1);
-            lcd.print("READY TO PLAY   ");
-            break;
-
-        case STARTED:
-            showPuzzleStatus();
-            break;
-
-        case FAILED:
-            lcd.setCursor(0, 0);
-            lcd.print("WRONG ORDER!    ");
-            lcd.setCursor(0, 1);
-            lcd.print("TRY AGAIN...    ");
-            break;
-
-        case COMPLETED:
-            lcd.setCursor(0, 0);
-            lcd.print("PUZZLE SOLVED!  ");
-            lcd.setCursor(0, 1);
-            lcd.print("COINS ACCEPTED  ");
-            break;
-
-        case STOPPED:
-            lcd.setCursor(0, 0);
-            lcd.print("GAME PAUSED /   ");
-            lcd.setCursor(0, 1);
-            lcd.print("STOPPED BY GM   ");
-            break;
-    }
-}
-
-void showPuzzleStatus() {
-    // Line 0: "1:O 2:. 3:O 4:." -> 15 chars (O = Coin Present, . = Empty Slot)
-    lcd.setCursor(0, 0);
-    char line0[17];
-    snprintf(line0, sizeof(line0), "1:%c 2:%c 3:%c 4:%c  ",
-             cardPresent[0] ? 'O' : '.',
-             cardPresent[1] ? 'O' : '.',
-             cardPresent[2] ? 'O' : '.',
-             cardPresent[3] ? 'O' : '.');
-    lcd.print(line0);
-
-    // Line 1: Real-time placement count
-    lcd.setCursor(0, 1);
-    int count = getCoinsPresentCount();
-    if (count == 4) {
-        lcd.print("CHECKING ORDER..");
-    } else {
-        char line1[17];
-        snprintf(line1, sizeof(line1), "Placed: %d/4 Coins", count);
-        lcd.print(line1);
-    }
-}
-
-// =================================================================================
-// 9. THREAD-SAFE STATE & EVENT POSTING (Core 1 -> Core 0)
+// 8. THREAD-SAFE STATE & EVENT POSTING (Core 1 -> Core 0)
 // =================================================================================
 
 void postState(GameState state) {
@@ -697,7 +628,7 @@ void publishEvent(const char* eventName) {
 }
 
 // =================================================================================
-// 10. COMMAND DISPATCHER (Core 1)
+// 9. COMMAND DISPATCHER (Core 1)
 // =================================================================================
 
 void handleCommand(String cmd) {
@@ -707,7 +638,7 @@ void handleCommand(String cmd) {
         patternEvaluated = false;
         stateTransitionTime = 0;
         currentState = STARTED;
-        lockAllActuators();
+        lockDoor();
         postState(STARTED);
         postEvent("STARTED");
 
@@ -726,15 +657,13 @@ void handleCommand(String cmd) {
         } else {
             evaluatePattern();
         }
-        updateLcdDisplay();
     }
     else if (cmd.equalsIgnoreCase("STOP")) {
         currentState = STOPPED;
         stateTransitionTime = 0;
-        lockAllActuators();
+        lockDoor();
         postState(STOPPED);
         postEvent("STOPPED");
-        updateLcdDisplay();
     }
     else if (cmd.equalsIgnoreCase("RESET")) {
         puzzleSolved = false;
@@ -742,7 +671,7 @@ void handleCommand(String cmd) {
         stateTransitionTime = 0;
         currentState = READY;
         attemptNumber = 0;
-        lockAllActuators();
+        lockDoor();
         postState(READY);
         postEvent("RESET");
 
@@ -753,7 +682,6 @@ void handleCommand(String cmd) {
             memset(detectedUID[i], 0, sizeof(detectedUID[i]));
             cardPresent[i] = scanReader(i);
         }
-        updateLcdDisplay();
     }
     else if (cmd.equalsIgnoreCase("SOLVE") || cmd.equalsIgnoreCase("OVERRIDE")) {
         Serial.println("🔓 [REMOTE OVERRIDE] Game Master solved puzzle remotely!");
@@ -762,7 +690,7 @@ void handleCommand(String cmd) {
 }
 
 // =================================================================================
-// 11. SETUP (Core 1)
+// 10. SETUP (Core 1)
 // =================================================================================
 
 void setup() {
@@ -773,61 +701,24 @@ void setup() {
     Serial.println("   ESCAPE ROOM: 4-RFID COINS PUZZLE (Dual-Core)   ");
     Serial.println("==================================================");
 
-    // 1. Initialize Relay & Servos
+    // 1. Initialize Relay (Glitch-free: set state BEFORE pin mode)
+    digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? HIGH : LOW);
     pinMode(RELAY_PIN, OUTPUT);
-
-    // Initialize Servo Motors (ESP32 PWM timers)
-    ESP32PWM::allocateTimer(0);
-    ESP32PWM::allocateTimer(1);
-    ESP32PWM::allocateTimer(2);
-    ESP32PWM::allocateTimer(3);
-
-    if (SERVO1_PIN >= 0) {
-        servo1.setPeriodHertz(50);
-        servo1.attach(SERVO1_PIN, 500, 2400);
-        Serial.printf("⚙️ Servo 1 attached on GPIO %d\n", SERVO1_PIN);
-    }
-    if (SERVO2_PIN >= 0) {
-        servo2.setPeriodHertz(50);
-        servo2.attach(SERVO2_PIN, 500, 2400);
-        Serial.printf("⚙️ Servo 2 attached on GPIO %d\n", SERVO2_PIN);
-    }
-    if (SERVO3_PIN >= 0) {
-        servo3.setPeriodHertz(50);
-        servo3.attach(SERVO3_PIN, 500, 2400);
-        Serial.printf("⚙️ Servo 3 attached on GPIO %d\n", SERVO3_PIN);
-    }
-
-    lockAllActuators(); // Relays locked & Servos to 0°
+    digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? HIGH : LOW);
+    lockDoor();
 
     pinMode(RESET_BTN_PIN, INPUT_PULLUP);
 
-    if (BUZZER_PIN >= 0) {
-        pinMode(BUZZER_PIN, OUTPUT);
-        digitalWrite(BUZZER_PIN, LOW);
-    }
-
-    // 2. Initialize I2C Bus & LCD Display with bus timeout protection
-    Wire.begin(LCD_SDA, LCD_SCL);
-    Wire.setTimeOut(100); // 100ms timeout prevents I2C bus hang
-    lcd.init();
-    lcd.backlight();
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("COINS PUZZLE");
-    lcd.setCursor(0, 1);
-    lcd.print("BOOTING...");
-
-    // 3. Initialize SPI Bus
+    // 2. Initialize SPI Bus (Right Header)
     SPI.begin(RFID_SCK, RFID_MISO, RFID_MOSI);
 
-    // 4. Initialize RFID SS Pins
+    // 3. Initialize RFID SS Pins
     for (byte i = 0; i < NUM_READERS; i++) {
         pinMode(SS_PINS[i], OUTPUT);
     }
     deselectAllReaders();
 
-    // 5. Initialize each MFRC522 Reader individually
+    // 4. Initialize each MFRC522 Reader individually
     Serial.println("\nInitializing 4 RFID Coin Readers...");
     for (byte i = 0; i < NUM_READERS; i++) {
         deselectAllReaders();
@@ -844,17 +735,17 @@ void setup() {
     }
     Serial.println("All 4 RFID readers initialized successfully.\n");
 
-    // 6. Build MQTT Topics
+    // 5. Build MQTT Topics
     snprintf(topicStatus, sizeof(topicStatus), "%s/%s/status", ROOT_TOPIC, GAME_ID);
     snprintf(topicState,  sizeof(topicState),  "%s/%s/state",  ROOT_TOPIC, GAME_ID);
     snprintf(topicEvent,  sizeof(topicEvent),  "%s/%s/event",  ROOT_TOPIC, GAME_ID);
     snprintf(topicCmd,    sizeof(topicCmd),    "%s/%s/cmd",    ROOT_TOPIC, GAME_ID);
 
-    // 7. Create FreeRTOS Queues for Thread-Safe Inter-Core Communication
+    // 6. Create FreeRTOS Queues for Thread-Safe Inter-Core Communication
     cmdQueue = xQueueCreate(10, sizeof(CommandMsg));
     telemetryQueue = xQueueCreate(16, sizeof(TelemetryMsg));
 
-    // 8. Spawn Independent Background Network & MQTT Task on CPU Core 0
+    // 7. Spawn Independent Background Network & MQTT Task on CPU Core 0
     xTaskCreatePinnedToCore(
         networkTask,
         "NetworkTask",
@@ -865,7 +756,7 @@ void setup() {
         0  // Core 0
     );
 
-    // 9. Auto-Start if configured
+    // 8. Auto-Start if configured
     if (AUTO_START_ON_BOOT) {
         attemptNumber = 1;
         currentState = STARTED;
@@ -877,12 +768,10 @@ void setup() {
         postState(READY);
         postEvent("READY");
     }
-
-    updateLcdDisplay();
 }
 
 // =================================================================================
-// 12. MAIN LOOP (Core 1 — 100% Non-Blocking & Pure Card Scanning)
+// 11. MAIN LOOP (Core 1 — 100% Non-Blocking & Pure Card Scanning)
 // =================================================================================
 
 void loop() {
@@ -913,7 +802,6 @@ void loop() {
         if (currentState == FAILED) {
             currentState = STARTED;
             postState(STARTED);
-            updateLcdDisplay();
         }
     }
 
@@ -922,17 +810,17 @@ void loop() {
         checkAllCards();
     }
 
-    // 5. Non-blocking Auto-Relock Timer Check
+    // 5. Non-blocking Auto-Relock Timer Check (if configured)
     if (AUTO_RELOCK_DELAY_MS > 0 && unlockedAt > 0) {
         if (now - unlockedAt >= AUTO_RELOCK_DELAY_MS) {
             Serial.println("⏱️ [RELAY] Auto-relock timer elapsed. Securing door...");
-            lockAllActuators();
+            lockDoor();
         }
     }
 }
 
 // =================================================================================
-// 13. BACKGROUND NETWORK & MQTT TASK (Core 0 — Independent Thread)
+// 12. BACKGROUND NETWORK & MQTT TASK (Core 0 — Independent Thread)
 // =================================================================================
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {

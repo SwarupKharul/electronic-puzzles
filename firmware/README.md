@@ -126,17 +126,13 @@ All 4 RC522 RFID readers share the same SPI bus lines:
 | **Reader 3** | Coin Slot 3 | `GPIO 16` |
 | **Reader 4** | Coin Slot 4 | `GPIO 17` |
 
-### Actuators & Multi-Servo Wiring
+### Actuator & Controls Wiring (Production Setup)
 | Component | ESP32 GPIO | Notes |
 | :--- | :--- | :--- |
-| **Servo 1 (SIG)** | `GPIO 13` | Primary lock latch (0° locked ➔ 90° unlocked) |
-| **Servo 2 (SIG)** | `GPIO 33` | Secondary actuator (coin drawer / compartment) |
-| **Servo 3 (SIG)** | `GPIO 12` | Tertiary actuator (trapdoor / reveal) |
-| **Lock Relay (IN)**| `GPIO 25` | Active-LOW relay signal pin |
-| **I2C LCD (SDA)** | `GPIO 26` | 16x2 LCD display (Address `0x27`) |
-| **I2C LCD (SCL)** | `GPIO 27` | 16x2 LCD clock line |
-| **Piezo Buzzer**  | `GPIO 32` | Success & error tone feedback |
-| **Reset Button**  | `GPIO 14` | Optional manual override button |
+| **Lock Relay (IN)** | `GPIO 5` | Active-LOW relay signal pin (12V Maglock/Solenoid, Right Header) |
+| **Relay (VCC)** | `VIN` | 5V power (USB / external supply) |
+| **Relay (GND)** | `GND` | Common ground |
+| **Reset Button** | `GPIO 14` | Optional manual override push-button to GND |
 
 ---
 

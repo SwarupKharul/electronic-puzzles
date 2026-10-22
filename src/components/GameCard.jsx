@@ -147,6 +147,16 @@ export default function GameCard({ game, live, onCommand, onTestSound }) {
           >
             ⚡ Force Solve
           </button>
+          {game.id === "game2" && (
+            <button
+              className="btn btn-scare"
+              disabled={!isOnline}
+              onClick={() => onCommand("FLICKER")}
+              title="Trigger spooky red light horror flicker jump scare"
+            >
+              👻 Scare Flicker
+            </button>
+          )}
         </div>
 
         <div className="sound-tests">

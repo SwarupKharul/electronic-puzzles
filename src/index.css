@@ -247,6 +247,20 @@ body {
   transform: translateY(-1px);
 }
 
+.btn-scare {
+  background: linear-gradient(135deg, #7f1d1d 0%, #991b1b 100%);
+  color: #fecaca;
+  font-weight: 700;
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.25);
+}
+.btn-scare:hover:not(:disabled) {
+  background: linear-gradient(135deg, #991b1b 0%, #dc2626 100%);
+  box-shadow: 0 0 16px rgba(239, 68, 68, 0.6);
+  color: #fff;
+  transform: translateY(-1px);
+}
+
 .btn-audio-enable {
   background: linear-gradient(135deg, #06b6d4, #3b82f6);
   color: #fff;
@@ -301,6 +315,67 @@ body {
 
 .game-card.online {
   border-left: 4px solid var(--accent-green);
+}
+
+.game-card.state-failed {
+  border-color: rgba(239, 68, 68, 0.8) !important;
+  border-left-color: var(--accent-red) !important;
+  animation: scary-red-flicker 1.8s infinite;
+}
+
+@keyframes scary-red-flicker {
+  0% {
+    box-shadow: 0 0 16px rgba(239, 68, 68, 0.4), inset 0 0 10px rgba(239, 68, 68, 0.2);
+    border-color: rgba(239, 68, 68, 0.6);
+  }
+  6% {
+    box-shadow: 0 0 4px rgba(239, 68, 68, 0.1), inset 0 0 2px rgba(239, 68, 68, 0.05);
+    border-color: rgba(239, 68, 68, 0.2);
+  }
+  10% {
+    box-shadow: 0 0 28px rgba(239, 68, 68, 0.95), inset 0 0 18px rgba(239, 68, 68, 0.4);
+    border-color: rgba(239, 68, 68, 1);
+  }
+  16% {
+    box-shadow: 0 0 6px rgba(239, 68, 68, 0.15), inset 0 0 3px rgba(239, 68, 68, 0.1);
+    border-color: rgba(239, 68, 68, 0.3);
+  }
+  24% {
+    box-shadow: 0 0 34px rgba(239, 68, 68, 1), inset 0 0 24px rgba(239, 68, 68, 0.5);
+    border-color: #ef4444;
+  }
+  34% {
+    box-shadow: none;
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+  42% {
+    box-shadow: 0 0 22px rgba(239, 68, 68, 0.8), inset 0 0 14px rgba(239, 68, 68, 0.35);
+    border-color: #f87171;
+  }
+  48% {
+    box-shadow: none;
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+  56% {
+    box-shadow: 0 0 30px rgba(239, 68, 68, 0.9), inset 0 0 20px rgba(239, 68, 68, 0.4);
+    border-color: #ef4444;
+  }
+  70% {
+    box-shadow: 0 0 10px rgba(239, 68, 68, 0.3), inset 0 0 6px rgba(239, 68, 68, 0.15);
+    border-color: rgba(239, 68, 68, 0.4);
+  }
+  84% {
+    box-shadow: 0 0 36px rgba(239, 68, 68, 1), inset 0 0 26px rgba(239, 68, 68, 0.5);
+    border-color: #dc2626;
+  }
+  92% {
+    box-shadow: none;
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+  100% {
+    box-shadow: 0 0 16px rgba(239, 68, 68, 0.4), inset 0 0 10px rgba(239, 68, 68, 0.2);
+    border-color: rgba(239, 68, 68, 0.6);
+  }
 }
 
 .card-header {

@@ -122,6 +122,9 @@ function createProp(game) {
     } else if (cmd === "SOLVE" || cmd === "OVERRIDE") {
       publishState(gameId, "COMPLETED");
       publishEvent(gameId, "COMPLETED");
+    } else if (cmd === "FLICKER" || cmd === "SCARE") {
+      publishEvent(gameId, "FLICKER");
+      console.log(`👻 [${gameId}] Triggered red light horror flicker!`);
     }
     showPrompt();
   });

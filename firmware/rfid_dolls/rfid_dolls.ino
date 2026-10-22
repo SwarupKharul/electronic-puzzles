@@ -169,9 +169,12 @@ const int SERVO_UNLOCKED_POS = 90;  // 90° when puzzle is solved / unlocked (an
 const bool RELAY_ACTIVE_LOW      = true;
 const bool FAIL_RELAY_ACTIVE_LOW = true; // Set false if your relay module is Active-HIGH
 
-// Duration to illuminate Red Lights on incorrect attempt (milliseconds)
-const unsigned long FAIL_RED_LIGHT_DURATION_MS = 3000; // 3 seconds
-unsigned long failLightTurnOffTime = 0;
+// Scary Red Light Horror Flicker Configuration
+const unsigned long FAIL_RED_LIGHT_DURATION_MS = 3500; // 3.5 seconds of horror flicker
+bool isFailLightFlickering   = false;
+bool failLightState          = false; // true = illuminated, false = extinguished
+unsigned long failFlickerEndTime = 0; // when entire flicker sequence ends
+unsigned long nextFlickerToggle  = 0; // next millis() timestamp to toggle state
 
 // Auto-relock pulse duration in milliseconds (0 = stays unlocked until RESET)
 const unsigned long AUTO_RELOCK_DELAY_MS = 0;
@@ -330,6 +333,9 @@ void lockDoor();
 void unlockDoor();
 void turnOnFailLight();
 void turnOffFailLight();
+void startFailLightFlicker(unsigned long durationMs = FAIL_RED_LIGHT_DURATION_MS);
+void stopFailLightFlicker();
+void updateFailLightFlicker(unsigned long now);
 void moveServo(int angle);
 void triggerLocalBuzzer(bool success);
 void updateLcdDisplay();
@@ -346,19 +352,92 @@ void recoverReader(byte readerIdx);
 // 5. RELAY & ACTUATOR CONTROL (Relays + Servo Motor)
 // =================================================================================
 
-void turnOnFailLight() {
+void setFailRelayRaw(bool illuminated) {
     if (FAIL_RELAY_PIN >= 0) {
-        digitalWrite(FAIL_RELAY_PIN, FAIL_RELAY_ACTIVE_LOW ? LOW : HIGH);
-        failLightTurnOffTime = millis() + FAIL_RED_LIGHT_DURATION_MS;
-        Serial.println("🚨 [RELAY 2] Red Lights ON (Incorrect pattern attempt)");
+        failLightState = illuminated;
+        if (illuminated) {
+            digitalWrite(FAIL_RELAY_PIN, FAIL_RELAY_ACTIVE_LOW ? LOW : HIGH);
+        } else {
+            digitalWrite(FAIL_RELAY_PIN, FAIL_RELAY_ACTIVE_LOW ? HIGH : LOW);
+        }
     }
 }
 
+void startFailLightFlicker(unsigned long durationMs = FAIL_RED_LIGHT_DURATION_MS) {
+    if (FAIL_RELAY_PIN < 0) return;
+    isFailLightFlickering = true;
+    failFlickerEndTime = millis() + durationMs;
+    // Initial sudden jump scare: strike light ON immediately!
+    setFailRelayRaw(true);
+    // Stay ON for initial sudden flash (60-120ms)
+    nextFlickerToggle = millis() + random(60, 120);
+    Serial.println("👻 [SCARE] Red Light horror flicker STARTED!");
+}
+
+void stopFailLightFlicker() {
+    isFailLightFlickering = false;
+    failFlickerEndTime = 0;
+    nextFlickerToggle = 0;
+    setFailRelayRaw(false);
+    Serial.println("💡 [RELAY 2] Red Lights OFF");
+}
+
+void turnOnFailLight() {
+    startFailLightFlicker(FAIL_RED_LIGHT_DURATION_MS);
+}
+
 void turnOffFailLight() {
-    if (FAIL_RELAY_PIN >= 0) {
-        digitalWrite(FAIL_RELAY_PIN, FAIL_RELAY_ACTIVE_LOW ? HIGH : LOW);
-        failLightTurnOffTime = 0;
-        Serial.println("💡 [RELAY 2] Red Lights OFF");
+    stopFailLightFlicker();
+}
+
+void updateFailLightFlicker(unsigned long now) {
+    if (!isFailLightFlickering) return;
+
+    if (now >= failFlickerEndTime) {
+        stopFailLightFlicker();
+        return;
+    }
+
+    if (now >= nextFlickerToggle) {
+        // Toggle the light state
+        bool nextState = !failLightState;
+        setFailRelayRaw(nextState);
+
+        unsigned long interval;
+        if (nextState) {
+            // Light turned ON:
+            // 70% chance of rapid staccato pulse (35-95ms)
+            // 20% chance of medium stutter (95-175ms)
+            // 10% chance of ominous longer flare (200-380ms)
+            int roll = random(100);
+            if (roll < 70) {
+                interval = random(35, 95);
+            } else if (roll < 90) {
+                interval = random(95, 175);
+            } else {
+                interval = random(200, 380);
+            }
+        } else {
+            // Light turned OFF (darkness gap):
+            // 65% chance of micro-blackout (25-75ms)
+            // 20% chance of short hesitation (75-140ms)
+            // 15% chance of sudden suspenseful blackout pause (160-300ms)
+            int roll = random(100);
+            if (roll < 65) {
+                interval = random(25, 75);
+            } else if (roll < 85) {
+                interval = random(75, 140);
+            } else {
+                interval = random(160, 300);
+            }
+        }
+
+        // Avoid overshooting total duration
+        if (now + interval > failFlickerEndTime) {
+            interval = failFlickerEndTime - now;
+        }
+
+        nextFlickerToggle = now + interval;
     }
 }
 
@@ -769,7 +848,7 @@ void handleFailure() {
     publishEvent("FAILED");
 
     triggerLocalBuzzer(false);
-    turnOnFailLight(); // Turn ON Red Lights via AC Relay!
+    startFailLightFlicker(FAIL_RED_LIGHT_DURATION_MS); // Flicker Red Lights with scary horror effect!
 
     lcd.clear();
     lcd.setCursor(0, 0);
@@ -955,6 +1034,11 @@ void handleCommand(String cmd) {
         Serial.println("🔓 [REMOTE OVERRIDE] Game Master solved puzzle remotely!");
         handleSuccess();
     }
+    else if (cmd.equalsIgnoreCase("FLICKER") || cmd.equalsIgnoreCase("SCARE") || cmd.equalsIgnoreCase("LIGHT")) {
+        Serial.println("👻 [COMMAND] Game Master triggered scary light flicker!");
+        startFailLightFlicker(FAIL_RED_LIGHT_DURATION_MS);
+        postEvent("FLICKER");
+    }
 }
 
 // =================================================================================
@@ -1098,10 +1182,8 @@ void loop() {
     }
     lastButtonState = currentBtnState;
 
-    // 3. Non-Blocking Red Light & State Transitions (for FAILED cooldown)
-    if (failLightTurnOffTime > 0 && now >= failLightTurnOffTime) {
-        turnOffFailLight();
-    }
+    // 3. Non-Blocking Red Light Horror Flicker & State Transitions (for FAILED cooldown)
+    updateFailLightFlicker(now);
 
     if (stateTransitionTime > 0 && now >= stateTransitionTime) {
         stateTransitionTime = 0;

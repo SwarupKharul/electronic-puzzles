@@ -97,7 +97,7 @@ Each reader has its own dedicated Chip Select pin:
 | :--- | :--- | :--- |
 | **Servo Motor (SIG)** | `GPIO 13` | 0° = Locked / Standby, 90° = Unlocked (anticlockwise rotation) |
 | **Lock Relay (IN)** | `GPIO 25` | Active-LOW relay signal pin (12V Maglock/Solenoid) |
-| **Red Light Relay (IN)** | `GPIO 33` | Active-LOW relay signal pin (AC/DC Red Lights on incorrect attempt) |
+| **Red Light Relay (IN)** | `GPIO 33` | Active-LOW relay signal pin (Stochastic Horror Red Light Flicker on incorrect attempt or GM FLICKER / SCARE command) |
 | **I2C LCD (SDA)** | `GPIO 26` | 16x2 LCD display (Address `0x27`) |
 | **I2C LCD (SCL)** | `GPIO 27` | 16x2 LCD clock line |
 | **Piezo Buzzer** | `GPIO 32` | Local feedback beeps on RFID card scans |

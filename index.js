@@ -26,7 +26,7 @@ const __dirname = path.dirname(__filename);
 const ROOT = __dirname;
 
 const HTTP_PORT = Number(process.env.PORT || 3000);
-const MQTT_PORT = Number(process.env.MQTT_PORT || 1883);
+const MQTT_PORT = Number(process.env.MQTT_PORT || 1884);
 
 const SOUNDS = ["start", "failed", "success", "complete", "stop", "reset"];
 const EXTS = ["mp3", "wav", "ogg", "m4a"];
@@ -54,7 +54,7 @@ let defaultRootTopic = "escaperoom";
 try {
   const cfg = JSON.parse(readFileSync(path.join(ROOT, "games.json"), "utf8"));
   if (cfg.rootTopic) defaultRootTopic = cfg.rootTopic;
-} catch {}
+} catch { }
 
 const propRegistry = new Map(); // gameId -> { online, state, attempt, lastEvent, lastHeartbeat, heartbeatCount, lastSeen }
 const clientToGame = new Map(); // clientId -> gameId
@@ -101,7 +101,7 @@ function markPropOffline(gameId, reason) {
         try {
           console.log(`🔌 [SOCKET CLEANUP] Terminating stale socket for ${clientId}`);
           staleClient.close();
-        } catch {}
+        } catch { }
       }
     }
   }
@@ -136,7 +136,7 @@ try {
       lastSeen: 0
     });
   }
-} catch {}
+} catch { }
 
 // ---------------------------------------------------------------------------------
 // 2. Embedded Aedes MQTT Broker (High Performance & Resilient)
@@ -454,7 +454,7 @@ app.post("/api/games/:id/cmd", (req, res) => {
     try {
       const cfg = JSON.parse(readFileSync(configPath, "utf8"));
       rootTopic = cfg.rootTopic || rootTopic;
-    } catch {}
+    } catch { }
   }
 
   const topic = `${rootTopic}/${gameId}/cmd`;
@@ -547,7 +547,7 @@ wss.on("connection", (ws, req) => {
     console.warn("⚠️ WebSocket stream error:", err.message || err);
   });
 
-  ws.on("error", () => {});
+  ws.on("error", () => { });
 
   aedes.handle(stream, req);
 });
@@ -577,7 +577,7 @@ function gracefulShutdown(signal) {
 
   try {
     bonjour.destroy();
-  } catch {}
+  } catch { }
 
   wss.close(() => {
     httpServer.close(() => {

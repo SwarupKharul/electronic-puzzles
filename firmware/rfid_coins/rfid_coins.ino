@@ -75,6 +75,29 @@
  *
  * 3. OPTIONAL HARDWARE RESET BUTTON:
  *      Reset Button     --->   GPIO 14 (Active LOW to GND, internal pull-up)
+ *
+ * 4. SD CARD MODULE (Shared SPI Bus with RFID - Local Audio Playback):
+ *      CS               --->   GPIO 21 (Dedicated CS, separate from RFID readers)
+ *      SCK              --->   GPIO 18 (Shared with RFID SCK)
+ *      MOSI             --->   GPIO 23 (Shared with RFID MOSI)
+ *      MISO             --->   GPIO 19 (Shared with RFID MISO)
+ *      VCC              --->   3.3V or 5V (check your module)
+ *      GND              --->   GND
+ *
+ * 5. MAX98357A I2S AMPLIFIER (Local Audio Speaker):
+ *      BCLK             --->   GPIO 12
+ *      LRC              --->   GPIO 2
+ *      DIN              --->   GPIO 13
+ *      GND              --->   GND
+ *      VIN              --->   5V (VIN)
+ *
+ *    SD Card: FAT32 formatted, root directory files:
+ *      /start.mp3   - Played when game starts
+ *      /failed.mp3  - Played on incorrect coin placement
+ *      /success.mp3 - Played when puzzle is solved
+ *
+ *    Library (Arduino Library Manager):
+ *      "ESP8266Audio" by Earle F. Philhower, III (supports ESP32)
  * =================================================================================
  */
 
@@ -86,6 +109,10 @@
 #include <SPI.h>
 #include <MFRC522.h>
 #include <ESPmDNS.h>
+#include <SD.h>
+#include "AudioFileSourceSD.h"
+#include "AudioGeneratorMP3.h"
+#include "AudioOutputI2S.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -111,6 +138,20 @@
 #define RELAY_PIN      5  // Solenoid / Maglock Relay Signal (Right Header)
 #define RESET_BTN_PIN  14 // Optional manual reset button (active LOW to GND)
 
+// MAX98357A I2S Amplifier Pins
+#define I2S_BCLK  12
+#define I2S_LRC   2
+#define I2S_DOUT  13
+
+// SD Card Module Pin (Shares SPI bus with RFID readers, dedicated CS only)
+#define SD_CS    21
+
+// Audio File Paths (on SD card root, FAT32)
+#define AUDIO_GAIN   1.0f    // 0.0 - 4.0 (start low, raise if needed)
+#define SFX_START    "/start.mp3"
+#define SFX_FAILED   "/failed.mp3"
+#define SFX_SUCCESS  "/success.mp3"
+
 // Relay Trigger Logic (Standard 3-pin relay modules are ACTIVE-LOW)
 const bool RELAY_ACTIVE_LOW = true;
 
@@ -120,6 +161,12 @@ unsigned long unlockedAt = 0;
 
 // Set to true to start scanning immediately upon powering up without waiting for laptop START command
 const bool AUTO_START_ON_BOOT = true;
+
+// SD Card + I2S Audio Playback Globals
+AudioFileSourceSD *audioFile   = nullptr;
+AudioGeneratorMP3 *mp3Player   = nullptr;
+AudioOutputI2S    *audioOut    = nullptr;
+bool sdCardReady = false;
 
 // =================================================================================
 // 2. NETWORK & mDNS / MQTT CONFIGURATION (ZERO-IP SETUP)
@@ -150,19 +197,19 @@ const char* ROOT_TOPIC    = "escaperoom";     // Matches "rootTopic" in games.js
 // RFID coin stickers (printed to Serial monitor when you first tap them).
 const byte NUM_READERS = 4;
 const byte SS_PINS[NUM_READERS] = { SS1, SS2, SS3, SS4 };
-const byte EXPECTED_UID_SIZE = 4; // 4-byte UIDs (Mifare Classic 1K)
+const byte EXPECTED_UID_SIZE = 7; // 4-byte UIDs (Mifare Classic 1K)
 
-// Expected UID for Slot 1 (Coin 1) 6A F0 25 07
-byte expectedUID1[EXPECTED_UID_SIZE] = { 0x6A, 0xF0, 0x25, 0x07 };
+// Expected UID for Slot 1 (Coin 1) 04 42 E7 49 BC 2A 81 (bottom most)
+byte expectedUID1[EXPECTED_UID_SIZE] = { 0x04, 0x42, 0xE7, 0x49, 0xBC, 0x2A, 0x81 };
 
-// Expected UID for Slot 2 (Coin 2) 66 F2 2A 07
-byte expectedUID2[EXPECTED_UID_SIZE] = { 0x66, 0xF2, 0x2A, 0x07 };
+// Expected UID for Slot 2 (Coin 2) 04 29 E7 49 BC 2A 81
+byte expectedUID2[EXPECTED_UID_SIZE] = { 0x04, 0x29, 0xE7, 0x49, 0xBC, 0x2A, 0x81 };
 
-// Expected UID for Slot 3 (Coin 3) 5E 87 25 07
-byte expectedUID3[EXPECTED_UID_SIZE] = { 0x5E, 0x87, 0x25, 0x07 };
+// Expected UID for Slot 3 (Coin 3) 04 31 E7 49 BC 2A 81
+byte expectedUID3[EXPECTED_UID_SIZE] = { 0x04, 0x31, 0xE7, 0x49, 0xBC, 0x2A, 0x81 };
 
-// Expected UID for Slot 4 (Coin 4) CE 0B 24 07
-byte expectedUID4[EXPECTED_UID_SIZE] = { 0xCE, 0x0B, 0x24, 0x07 };
+// Expected UID for Slot 4 (Coin 4) 04 5A E7 49 BC 2A 81 (top most)
+byte expectedUID4[EXPECTED_UID_SIZE] = { 0x04, 0x5A, 0xE7, 0x49, 0xBC, 0x2A, 0x81 };
 
 const byte* expectedUIDs[NUM_READERS] = {
     expectedUID1,
@@ -263,6 +310,9 @@ void lockDoor();
 void unlockDoor();
 void lockAllActuators();
 void unlockAllActuators();
+void initAudio();
+void playSound(const char* filename);
+void stopAudio();
 bool uidMatches(const byte* actualUID, byte actualSize, const byte* expectedUID, byte expectedSize = EXPECTED_UID_SIZE);
 void printUID(const byte* uid, byte size);
 void printUIDInline(const byte* uid, byte size);
@@ -290,6 +340,76 @@ void lockAllActuators() {
 
 void unlockAllActuators() {
     unlockDoor();
+}
+
+// =================================================================================
+// 5b. SD CARD + I2S AUDIO PLAYBACK (Core 1)
+// =================================================================================
+void initAudio() {
+    Serial.println("\n🔊 [AUDIO] Initializing SD Card + MAX98357A I2S Audio...");
+
+    // SD card shares SPI bus (18/19/23) with RFID readers, only CS is separate
+    deselectAllReaders(); // Ensure RFID CS pins are HIGH before SD init
+    if (!SD.begin(SD_CS)) {
+        Serial.println("⚠️ [AUDIO] SD card mount failed! Local audio disabled.");
+        Serial.println("   Check: FAT32 format, wiring (CS=21, shared SCK=18, MOSI=23, MISO=19)");
+        sdCardReady = false;
+        return;
+    }
+    sdCardReady = true;
+    Serial.printf("✅ [AUDIO] SD card mounted. Type: %d, Size: %llu MB\n",
+                  SD.cardType(), SD.cardSize() / (1024 * 1024));
+
+    // List audio files on SD root for verification
+    File root = SD.open("/");
+    if (root) {
+        Serial.println("   Files on SD card:");
+        File f = root.openNextFile();
+        while (f) {
+            if (!f.isDirectory()) {
+                Serial.printf("     📄 %s (%u bytes)\n", f.name(), (unsigned)f.size());
+            }
+            f = root.openNextFile();
+        }
+    }
+
+    audioOut = new AudioOutputI2S();
+    audioOut->SetPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
+    audioOut->SetGain(AUDIO_GAIN);
+
+    audioFile  = new AudioFileSourceSD();
+    mp3Player  = new AudioGeneratorMP3();
+
+    Serial.println("✅ [AUDIO] I2S audio output ready (MAX98357A on BCLK=12, LRC=2, DIN=13).");
+}
+
+void playSound(const char* filename) {
+    if (!sdCardReady || !mp3Player || !audioFile || !audioOut) return;
+
+    // Stop any currently playing audio
+    if (mp3Player->isRunning()) {
+        mp3Player->stop();
+    }
+    audioFile->close();
+
+    deselectAllReaders(); // Ensure SPI bus is free for SD card access
+
+    if (!audioFile->open(filename)) {
+        Serial.printf("⚠️ [AUDIO] Could not open %s on SD card\n", filename);
+        return;
+    }
+
+    mp3Player->begin(audioFile, audioOut);
+    Serial.printf("🔊 [AUDIO] Playing: %s\n", filename);
+}
+
+void stopAudio() {
+    if (mp3Player && mp3Player->isRunning()) {
+        mp3Player->stop();
+    }
+    if (audioFile) {
+        audioFile->close();
+    }
 }
 
 // =================================================================================
@@ -567,6 +687,8 @@ void handleSuccess() {
 
     unlockDoor(); // Energize relay to unlock door / drawer
 
+    playSound(SFX_SUCCESS);
+
     // Publish COMPLETED -> Control Server plays victory audio
     publishState(COMPLETED);
     publishEvent("COMPLETED");
@@ -576,6 +698,8 @@ void handleFailure() {
     currentState = FAILED;
 
     Serial.println("❌❌❌ WRONG ORDER! 4 coins placed, but positions are incorrect. ❌❌❌");
+
+    playSound(SFX_FAILED);
 
     // Publish FAILED -> Control Server plays audio/game3/failed.ogg
     publishState(FAILED);
@@ -657,11 +781,14 @@ void handleCommand(String cmd) {
         } else {
             evaluatePattern();
         }
+
+        playSound(SFX_START);
     }
     else if (cmd.equalsIgnoreCase("STOP")) {
         currentState = STOPPED;
         stateTransitionTime = 0;
         lockDoor();
+        stopAudio();
         postState(STOPPED);
         postEvent("STOPPED");
     }
@@ -672,6 +799,7 @@ void handleCommand(String cmd) {
         currentState = READY;
         attemptNumber = 0;
         lockDoor();
+        stopAudio();
         postState(READY);
         postEvent("RESET");
 
@@ -734,6 +862,9 @@ void setup() {
         Serial.printf("  Reader %d [%s] ready on SS Pin %d\n", i + 1, readerNames[i], SS_PINS[i]);
     }
     Serial.println("All 4 RFID readers initialized successfully.\n");
+
+    // 5. Initialize SD Card + I2S Audio (SD shares SPI bus with RFID)
+    initAudio();
 
     // 5. Build MQTT Topics
     snprintf(topicStatus, sizeof(topicStatus), "%s/%s/status", ROOT_TOPIC, GAME_ID);
@@ -815,6 +946,16 @@ void loop() {
         if (now - unlockedAt >= AUTO_RELOCK_DELAY_MS) {
             Serial.println("⏱️ [RELAY] Auto-relock timer elapsed. Securing door...");
             lockDoor();
+        }
+    }
+
+    // 6. Non-blocking MP3 Audio Playback Processing
+    if (mp3Player && mp3Player->isRunning()) {
+        deselectAllReaders(); // Ensure SPI bus is free for SD card reads
+        if (!mp3Player->loop()) {
+            mp3Player->stop();
+            audioFile->close();
+            Serial.println("🔊 [AUDIO] Playback finished.");
         }
     }
 }

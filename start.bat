@@ -69,7 +69,7 @@ echo.
 :: -------------------------------------------------------------------
 :: 3. INSTALL NPM PACKAGES (First run only)
 :: -------------------------------------------------------------------
-if not exist "%~dp0node_modules\" (
+if not exist "%~dp0node_modules" (
     echo  [*] First-time setup detected: Installing required dependencies...
     echo  [*] This takes about 1-2 minutes. Please wait...
     echo.
@@ -133,53 +133,50 @@ echo.
 echo  [*] Checking Eclipse Mosquitto MQTT Broker...
 
 :: Ensure mosquitto persistence directory exists
-if not exist "%~dp0mosquitto-data\" (
-    mkdir "%~dp0mosquitto-data" >nul 2>&1
-)
+if not exist "%~dp0mosquitto-data" mkdir "%~dp0mosquitto-data" >nul 2>&1
 
 set "MOSQUITTO_CMD="
-where mosquitto >nul 2>&1
-if %ERRORLEVEL% EQU 0 (
-    set "MOSQUITTO_CMD=mosquitto"
-) else if exist "%ProgramFiles%\mosquitto\mosquitto.exe" (
-    set "MOSQUITTO_CMD=%ProgramFiles%\mosquitto\mosquitto.exe"
-) else if exist "%ProgramFiles(x86)%\mosquitto\mosquitto.exe" (
-    set "MOSQUITTO_CMD=%ProgramFiles(x86)%\mosquitto\mosquitto.exe"
-) else if exist "C:\mosquitto\mosquitto.exe" (
-    set "MOSQUITTO_CMD=C:\mosquitto\mosquitto.exe"
+
+:: 1. Check if mosquitto is directly in PATH
+for /f "delims=" %%I in ('where mosquitto 2^>nul') do (
+    if not defined MOSQUITTO_CMD set "MOSQUITTO_CMD=%%I"
 )
 
+:: 2. Check standard installation directories
+if not defined MOSQUITTO_CMD if exist "%ProgramFiles%\mosquitto\mosquitto.exe" set "MOSQUITTO_CMD=%ProgramFiles%\mosquitto\mosquitto.exe"
+if not defined MOSQUITTO_CMD if exist "C:\Program Files\mosquitto\mosquitto.exe" set "MOSQUITTO_CMD=C:\Program Files\mosquitto\mosquitto.exe"
+if not defined MOSQUITTO_CMD if exist "C:\Program Files (x86)\mosquitto\mosquitto.exe" set "MOSQUITTO_CMD=C:\Program Files (x86)\mosquitto\mosquitto.exe"
+if not defined MOSQUITTO_CMD if exist "C:\mosquitto\mosquitto.exe" set "MOSQUITTO_CMD=C:\mosquitto\mosquitto.exe"
+
+:: 3. If not found, attempt install via winget
 if not defined MOSQUITTO_CMD (
     where winget >nul 2>&1
-    if %ERRORLEVEL% EQU 0 (
+    if not errorlevel 1 (
         echo  [*] Mosquitto broker not found. Attempting install via winget...
         winget install -e --id EclipseFoundation.Mosquitto --accept-package-agreements --accept-source-agreements
-        if exist "%ProgramFiles%\mosquitto\mosquitto.exe" (
-            set "MOSQUITTO_CMD=%ProgramFiles%\mosquitto\mosquitto.exe"
-        ) else if exist "%ProgramFiles(x86)%\mosquitto\mosquitto.exe" (
-            set "MOSQUITTO_CMD=%ProgramFiles(x86)%\mosquitto\mosquitto.exe"
-        )
+        if exist "%ProgramFiles%\mosquitto\mosquitto.exe" set "MOSQUITTO_CMD=%ProgramFiles%\mosquitto\mosquitto.exe"
+        if exist "C:\Program Files (x86)\mosquitto\mosquitto.exe" set "MOSQUITTO_CMD=C:\Program Files (x86)\mosquitto\mosquitto.exe"
     )
 )
 
 if defined MOSQUITTO_CMD (
     :: Stop default Windows service if active so our custom mosquitto.conf can bind port 1883
     sc query mosquitto 2>nul | find /I "RUNNING" >nul
-    if %ERRORLEVEL% EQU 0 (
+    if not errorlevel 1 (
         echo  [*] Stopping background Windows Mosquitto service to apply custom config...
         net stop mosquitto >nul 2>&1
     )
 
     :: Stop any previously orphaned mosquitto.exe process
     tasklist /FI "IMAGENAME eq mosquitto.exe" 2>nul | find /I "mosquitto.exe" >nul
-    if %ERRORLEVEL% EQU 0 (
+    if not errorlevel 1 (
         echo  [*] Restarting existing Mosquitto process with current config...
         taskkill /F /IM mosquitto.exe >nul 2>&1
         timeout /t 1 /nobreak >nul
     )
 
     echo  [*] Starting Mosquitto MQTT broker with config: mosquitto.conf...
-    start "Escape Room - Mosquitto MQTT Broker" /D "%~dp0" "%MOSQUITTO_CMD%" -c "%~dp0mosquitto.conf" -v
+    start "Escape Room - Mosquitto MQTT Broker" "%MOSQUITTO_CMD%" -c "%~dp0mosquitto.conf" -v
     timeout /t 1 /nobreak >nul
     echo  [OK] Eclipse Mosquitto broker active on ports 1883 [MQTT] and 9001 [WS].
 ) else (

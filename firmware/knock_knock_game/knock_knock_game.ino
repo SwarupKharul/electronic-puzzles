@@ -40,6 +40,29 @@
  *      Piezo Sensor (+) --->   GPIO 34 (Analog In ADC1, 1M pull-down resistor to GND)
  *      Piezo Sensor (-) --->   GND
  *      Reset Button     --->   GPIO 14 (Active LOW to GND, internal pullup)
+ *
+ * 4. SD CARD MODULE (SPI - Local Audio Playback):
+ *      CS               --->   GPIO 21
+ *      SCK              --->   GPIO 18
+ *      MOSI             --->   GPIO 23
+ *      MISO             --->   GPIO 19
+ *      VCC              --->   3.3V or 5V (check your module)
+ *      GND              --->   GND
+ *
+ * 5. MAX98357A I2S AMPLIFIER (Local Audio Speaker):
+ *      BCLK             --->   GPIO 12
+ *      LRC              --->   GPIO 2
+ *      DIN              --->   GPIO 13
+ *      GND              --->   GND
+ *      VIN              --->   5V (VIN)
+ *
+ *    SD Card: FAT32 formatted, root directory files:
+ *      /start.mp3   - Played when game starts
+ *      /failed.mp3  - Played on incorrect knock pattern
+ *      /success.mp3 - Played when puzzle is solved
+ *
+ *    Library (Arduino Library Manager):
+ *      "ESP8266Audio" by Earle F. Philhower, III (supports ESP32)
  * =================================================================================
  */
 
@@ -51,6 +74,11 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <ESPmDNS.h>
+#include <SD.h>
+#include <SPI.h>
+#include "AudioFileSourceSD.h"
+#include "AudioGeneratorMP3.h"
+#include "AudioOutputI2S.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -69,6 +97,23 @@ const int PIEZO_PIN       = 34; // Analog input for Piezo knock sensor (ADC1)
 const int RELAY_PIN       = 25; // 3-Pin Relay Signal Pin (IN / SIG / S)
 const int RESET_BTN_PIN   = 14; // Physical manual reset button (active LOW)
 
+// MAX98357A I2S Amplifier Pins
+#define I2S_BCLK  12
+#define I2S_LRC   2
+#define I2S_DOUT  13
+
+// SD Card Module Pins (SPI)
+#define SD_CS    21
+#define SD_SCK   18
+#define SD_MISO  19
+#define SD_MOSI  23
+
+// Audio File Paths (on SD card root, FAT32)
+#define AUDIO_GAIN   1.0f    // 0.0 - 4.0 (start low, raise if needed)
+#define SFX_START    "/start.mp3"
+#define SFX_FAILED   "/failed.mp3"
+#define SFX_SUCCESS  "/success.mp3"
+
 // 3-Pin Relay Trigger Logic (Most standard 3-pin relay modules are ACTIVE-LOW)
 const bool RELAY_ACTIVE_LOW = true;
 
@@ -78,6 +123,12 @@ unsigned long unlockedAt = 0;
 
 // Set to true to start listening immediately on boot
 const bool AUTO_START_ON_BOOT = true;
+
+// SD Card + I2S Audio Playback Globals
+AudioFileSourceSD *audioFile   = nullptr;
+AudioGeneratorMP3 *mp3Player   = nullptr;
+AudioOutputI2S    *audioOut    = nullptr;
+bool sdCardReady = false;
 
 // =================================================================================
 // 2. NETWORK & mDNS / MQTT CONFIGURATION (ZERO-IP SETUP)
@@ -200,6 +251,9 @@ void lockDoor();
 void unlockDoor();
 void handleSuccess();
 void handleFailure();
+void initAudio();
+void playSound(const char* filename);
+void stopAudio();
 
 // =================================================================================
 // 5. RELAY & ACTUATOR CONTROL (Core 1)
@@ -217,12 +271,81 @@ void unlockDoor() {
 }
 
 // =================================================================================
+// 5b. SD CARD + I2S AUDIO PLAYBACK (Core 1)
+// =================================================================================
+void initAudio() {
+  Serial.println("\n🔊 [AUDIO] Initializing SD Card + MAX98357A I2S Audio...");
+
+  SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  if (!SD.begin(SD_CS)) {
+    Serial.println("⚠️ [AUDIO] SD card mount failed! Local audio disabled.");
+    Serial.println("   Check: FAT32 format, wiring (CS=21, SCK=18, MOSI=23, MISO=19)");
+    sdCardReady = false;
+    return;
+  }
+  sdCardReady = true;
+  Serial.printf("✅ [AUDIO] SD card mounted. Type: %d, Size: %llu MB\n",
+                SD.cardType(), SD.cardSize() / (1024 * 1024));
+
+  // List audio files on SD root for verification
+  File root = SD.open("/");
+  if (root) {
+    Serial.println("   Files on SD card:");
+    File f = root.openNextFile();
+    while (f) {
+      if (!f.isDirectory()) {
+        Serial.printf("     📄 %s (%u bytes)\n", f.name(), (unsigned)f.size());
+      }
+      f = root.openNextFile();
+    }
+  }
+
+  audioOut = new AudioOutputI2S();
+  audioOut->SetPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
+  audioOut->SetGain(AUDIO_GAIN);
+
+  audioFile  = new AudioFileSourceSD();
+  mp3Player  = new AudioGeneratorMP3();
+
+  Serial.println("✅ [AUDIO] I2S audio output ready (MAX98357A on BCLK=12, LRC=2, DIN=13).");
+}
+
+void playSound(const char* filename) {
+  if (!sdCardReady || !mp3Player || !audioFile || !audioOut) return;
+
+  // Stop any currently playing audio
+  if (mp3Player->isRunning()) {
+    mp3Player->stop();
+  }
+  audioFile->close();
+
+  if (!audioFile->open(filename)) {
+    Serial.printf("⚠️ [AUDIO] Could not open %s on SD card\n", filename);
+    return;
+  }
+
+  mp3Player->begin(audioFile, audioOut);
+  Serial.printf("🔊 [AUDIO] Playing: %s\n", filename);
+}
+
+void stopAudio() {
+  if (mp3Player && mp3Player->isRunning()) {
+    mp3Player->stop();
+  }
+  if (audioFile) {
+    audioFile->close();
+  }
+}
+
+// =================================================================================
 // 6. SUCCESS & FAILURE HANDLERS (Core 1)
 // =================================================================================
 void handleSuccess() {
   currentState = COMPLETED;
   resetKnockState();
   unlockDoor(); // Energize relay
+
+  playSound(SFX_SUCCESS);
 
   postState(COMPLETED);
   postEvent("COMPLETED");
@@ -237,6 +360,9 @@ void handleSuccess() {
 void handleFailure() {
   currentState = FAILED;
   resetKnockState();
+
+  playSound(SFX_FAILED);
+
   postState(FAILED);
   postEvent("FAILED");
 
@@ -290,6 +416,7 @@ void handleCommand(String cmd) {
     stateTransitionTime = 0;
     lockDoor();
     resetKnockState();
+    playSound(SFX_START);
     postState(STARTED);
     postEvent("STARTED");
     updateLcdDisplay();
@@ -299,6 +426,7 @@ void handleCommand(String cmd) {
     stateTransitionTime = 0;
     lockDoor();
     resetKnockState();
+    stopAudio();
     postState(STOPPED);
     postEvent("STOPPED");
     updateLcdDisplay();
@@ -309,6 +437,7 @@ void handleCommand(String cmd) {
     stateTransitionTime = 0;
     lockDoor();
     resetKnockState();
+    stopAudio();
     postState(READY);
     postEvent("RESET");
     updateLcdDisplay();
@@ -345,6 +474,9 @@ void setup() {
   lcd.print("KNOCK PUZZLE");
   lcd.setCursor(0, 1);
   lcd.print("READY TO PLAY");
+
+  // Initialize SD Card + I2S Audio
+  initAudio();
 
   // Construct MQTT Topics
   snprintf(topicStatus, sizeof(topicStatus), "%s/%s/status", ROOT_TOPIC, GAME_ID);
@@ -428,6 +560,15 @@ void loop() {
     if (now - unlockedAt >= AUTO_RELOCK_DELAY_MS) {
       Serial.println("⏱️ [RELAY] Auto-relock timer elapsed. Securing door...");
       lockDoor();
+    }
+  }
+
+  // 6. Non-blocking MP3 Audio Playback Processing
+  if (mp3Player && mp3Player->isRunning()) {
+    if (!mp3Player->loop()) {
+      mp3Player->stop();
+      audioFile->close();
+      Serial.println("🔊 [AUDIO] Playback finished.");
     }
   }
 }

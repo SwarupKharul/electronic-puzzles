@@ -74,6 +74,29 @@
  * 6. PHYSICAL HARDWARE BUTTON & BUZZER:
  *      Reset Button     --->   GPIO 14 (Active LOW to GND, internal pullup)
  *      Piezo Buzzer     --->   GPIO 32 (Positive to Pin, Negative to GND, -1 to disable)
+ *
+ * 7. SD CARD MODULE (Shared SPI Bus with RFID - Local Audio Playback):
+ *      CS               --->   GPIO 5 (Dedicated CS, separate from RFID readers)
+ *      SCK              --->   GPIO 18 (Shared with RFID SCK)
+ *      MOSI             --->   GPIO 23 (Shared with RFID MOSI)
+ *      MISO             --->   GPIO 19 (Shared with RFID MISO)
+ *      VCC              --->   3.3V or 5V (check your module)
+ *      GND              --->   GND
+ *
+ * 8. MAX98357A I2S AMPLIFIER (Local Audio Speaker):
+ *      BCLK             --->   GPIO 12
+ *      LRC              --->   GPIO 2
+ *      DIN              --->   GPIO 21 (GPIO 13 is taken by Servo)
+ *      GND              --->   GND
+ *      VIN              --->   5V (VIN)
+ *
+ *    SD Card: FAT32 formatted, root directory files:
+ *      /start.mp3   - Played when game starts
+ *      /failed.mp3  - Played on incorrect dolls placement
+ *      /success.mp3 - Played when puzzle is solved
+ *
+ *    Library (Arduino Library Manager):
+ *      "ESP8266Audio" by Earle F. Philhower, III (supports ESP32)
  * =================================================================================
  */
 
@@ -88,6 +111,10 @@
 #include <LiquidCrystal_I2C.h>
 #include <ESPmDNS.h>
 #include <ESP32Servo.h>
+#include <SD.h>
+#include "AudioFileSourceSD.h"
+#include "AudioGeneratorMP3.h"
+#include "AudioOutputI2S.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -120,6 +147,20 @@
 #define RESET_BTN_PIN  14 // Optional manual reset button (active LOW)
 #define BUZZER_PIN     32 // Optional local piezo buzzer (-1 to disable)
 
+// MAX98357A I2S Amplifier Pins (GPIO 13 taken by servo, so DIN uses 21)
+#define I2S_BCLK  12
+#define I2S_LRC   2
+#define I2S_DOUT  21
+
+// SD Card Module Pin (Shares SPI bus with RFID readers, dedicated CS on GPIO 5)
+#define SD_CS     5
+
+// Audio File Paths (on SD card root, FAT32)
+#define AUDIO_GAIN   1.0f    // 0.0 - 4.0 (start low, raise if needed)
+#define SFX_START    "/start.mp3"
+#define SFX_FAILED   "/failed.mp3"
+#define SFX_SUCCESS  "/success.mp3"
+
 // Servo Motor Positions (Degrees)
 const int SERVO_LOCKED_POS   = 0;   // 0° when reset / standby / locked
 const int SERVO_UNLOCKED_POS = 90;  // 90° when puzzle is solved / unlocked (anticlockwise 90° rotation)
@@ -138,6 +179,12 @@ unsigned long unlockedAt = 0;
 
 // Set to true to start scanning immediately upon powering up without waiting for laptop START command
 const bool AUTO_START_ON_BOOT = true;
+
+// SD Card + I2S Audio Playback Globals
+AudioFileSourceSD *audioFile   = nullptr;
+AudioGeneratorMP3 *mp3Player   = nullptr;
+AudioOutputI2S    *audioOut    = nullptr;
+bool sdCardReady = false;
 
 // =================================================================================
 // 2. NETWORK & mDNS / MQTT CONFIGURATION (ZERO-IP SETUP)
@@ -287,6 +334,9 @@ void moveServo(int angle);
 void triggerLocalBuzzer(bool success);
 void updateLcdDisplay();
 void showPuzzleStatus();
+void initAudio();
+void playSound(const char* filename);
+void stopAudio();
 bool uidMatches(const byte* actualUID, byte actualSize, const byte* expectedUID, byte expectedSize = EXPECTED_UID_SIZE);
 void printUID(const byte* uid, byte size);
 void printUIDInline(const byte* uid, byte size);
@@ -342,6 +392,76 @@ void triggerLocalBuzzer(bool success) {
         tone(BUZZER_PIN, 1400, 300); // Single celebratory tone (no blocking delay)
     } else {
         tone(BUZZER_PIN, 250, 400);  // Low failure buzz
+    }
+}
+
+// =================================================================================
+// 5b. SD CARD + I2S AUDIO PLAYBACK (Core 1)
+// =================================================================================
+void initAudio() {
+    Serial.println("\n🔊 [AUDIO] Initializing SD Card + MAX98357A I2S Audio...");
+
+    // SD card shares SPI bus (18/19/23) with RFID readers, only CS is separate
+    deselectAllReaders(); // Ensure RFID CS pins are HIGH before SD init
+    if (!SD.begin(SD_CS)) {
+        Serial.println("⚠️ [AUDIO] SD card mount failed! Local audio disabled.");
+        Serial.println("   Check: FAT32 format, wiring (CS=5, shared SCK=18, MOSI=23, MISO=19)");
+        sdCardReady = false;
+        return;
+    }
+    sdCardReady = true;
+    Serial.printf("✅ [AUDIO] SD card mounted. Type: %d, Size: %llu MB\n",
+                  SD.cardType(), SD.cardSize() / (1024 * 1024));
+
+    // List audio files on SD root for verification
+    File root = SD.open("/");
+    if (root) {
+        Serial.println("   Files on SD card:");
+        File f = root.openNextFile();
+        while (f) {
+            if (!f.isDirectory()) {
+                Serial.printf("     📄 %s (%u bytes)\n", f.name(), (unsigned)f.size());
+            }
+            f = root.openNextFile();
+        }
+    }
+
+    audioOut = new AudioOutputI2S();
+    audioOut->SetPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
+    audioOut->SetGain(AUDIO_GAIN);
+
+    audioFile  = new AudioFileSourceSD();
+    mp3Player  = new AudioGeneratorMP3();
+
+    Serial.println("✅ [AUDIO] I2S audio output ready (MAX98357A on BCLK=12, LRC=2, DIN=21).");
+}
+
+void playSound(const char* filename) {
+    if (!sdCardReady || !mp3Player || !audioFile || !audioOut) return;
+
+    // Stop any currently playing audio
+    if (mp3Player->isRunning()) {
+        mp3Player->stop();
+    }
+    audioFile->close();
+
+    deselectAllReaders(); // Ensure SPI bus is free for SD card access
+
+    if (!audioFile->open(filename)) {
+        Serial.printf("⚠️ [AUDIO] Could not open %s on SD card\n", filename);
+        return;
+    }
+
+    mp3Player->begin(audioFile, audioOut);
+    Serial.printf("🔊 [AUDIO] Playing: %s\n", filename);
+}
+
+void stopAudio() {
+    if (mp3Player && mp3Player->isRunning()) {
+        mp3Player->stop();
+    }
+    if (audioFile) {
+        audioFile->close();
     }
 }
 
@@ -622,6 +742,8 @@ void handleSuccess() {
 
     unlockDoor(); // Actuate relay & move servo to 90° (anticlockwise)
 
+    playSound(SFX_SUCCESS);
+
     // Publish COMPLETED -> Control Server plays victory audio
     publishState(COMPLETED);
     publishEvent("COMPLETED");
@@ -639,6 +761,8 @@ void handleFailure() {
     currentState = FAILED;
 
     Serial.println("❌❌❌ WRONG PATTERN! 4 cards placed, but sequence is incorrect. ❌❌❌");
+
+    playSound(SFX_FAILED);
 
     // Publish FAILED -> Control Server plays audio/<game_id>/failed.mp3 or failed.ogg
     publishState(FAILED);
@@ -794,12 +918,15 @@ void handleCommand(String cmd) {
         } else {
             evaluatePattern();
         }
+
+        playSound(SFX_START);
         updateLcdDisplay();
     }
     else if (cmd.equalsIgnoreCase("STOP")) {
         currentState = STOPPED;
         stateTransitionTime = 0;
         lockDoor();
+        stopAudio();
         postState(STOPPED);
         postEvent("STOPPED");
         updateLcdDisplay();
@@ -811,6 +938,7 @@ void handleCommand(String cmd) {
         currentState = READY;
         attemptNumber = 0;
         lockDoor();
+        stopAudio();
         postState(READY);
         postEvent("RESET");
 
@@ -904,6 +1032,9 @@ void setup() {
     }
     Serial.println("All 4 RFID readers initialized successfully.\n");
 
+    // 5b. Initialize SD Card + I2S Audio (SD shares SPI bus with RFID, CS=5)
+    initAudio();
+
     // 6. Build MQTT Topics
     snprintf(topicStatus, sizeof(topicStatus), "%s/%s/status", ROOT_TOPIC, GAME_ID);
     snprintf(topicState,  sizeof(topicState),  "%s/%s/state",  ROOT_TOPIC, GAME_ID);
@@ -992,6 +1123,16 @@ void loop() {
         if (now - unlockedAt >= AUTO_RELOCK_DELAY_MS) {
             Serial.println("⏱️ [RELAY] Auto-relock timer elapsed. Securing door...");
             lockDoor();
+        }
+    }
+
+    // 6. Non-blocking MP3 Audio Playback Processing
+    if (mp3Player && mp3Player->isRunning()) {
+        deselectAllReaders(); // Ensure SPI bus is free for SD card reads
+        if (!mp3Player->loop()) {
+            mp3Player->stop();
+            audioFile->close();
+            Serial.println("🔊 [AUDIO] Playback finished.");
         }
     }
 }
